@@ -19,6 +19,8 @@ sessions/
 submitted_jobs.json
 bot.log
 *.log
+data/
+*.db
 
 # OS & Temp
 .DS_Store

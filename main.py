@@ -83,9 +83,6 @@ async def start_framework():
             server = uvicorn.Server(config)
             await server.serve()
 
-            await telegram_application.updater.stop()
-            await telegram_application.stop()
-
 if __name__ == "__main__":
     try:
         asyncio.run(start_framework())

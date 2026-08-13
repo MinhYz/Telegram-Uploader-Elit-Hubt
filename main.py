@@ -73,15 +73,18 @@ async def start_framework():
     # 5. Build and Start Telegram Bot
     telegram_application = bot_app.build()
     if telegram_application:
-        await telegram_application.initialize()
-        await telegram_application.start()
-        await telegram_application.updater.start_polling(drop_pending_updates=True)
-        logger.info("Telegram Bot App initialized and polling successfully!")
+        async with telegram_application:
+            await telegram_application.start()
+            await telegram_application.updater.start_polling(drop_pending_updates=True)
+            logger.info("Telegram Bot App initialized and polling successfully!")
 
-    # 6. Run FastAPI Server
-    config = uvicorn.Config(app=api_app, host="0.0.0.0", port=8000, log_level="warning")
-    server = uvicorn.Server(config)
-    await server.serve()
+            # 6. Run FastAPI Server
+            config = uvicorn.Config(app=api_app, host="0.0.0.0", port=8000, log_level="warning")
+            server = uvicorn.Server(config)
+            await server.serve()
+
+            await telegram_application.updater.stop()
+            await telegram_application.stop()
 
 if __name__ == "__main__":
     try:

@@ -33,6 +33,7 @@ class TelegramBotApp:
 
         # Command Handlers
         self.app.add_handler(CommandHandler(["start", "menu"], self.start_cmd))
+        self.app.add_handler(CommandHandler(["help", "huongdan"], self.help_cmd))
         self.app.add_handler(CommandHandler(["check", "quet"], self.check_cmd))
         self.app.add_handler(CommandHandler("solve", self.solve_cmd))
         self.app.add_handler(CommandHandler("submit", self.submit_cmd))
@@ -49,6 +50,33 @@ class TelegramBotApp:
         self.app.add_handler(MessageHandler(filters.ATTACHMENT, self.file_upload_handler))
 
         return self.app
+
+    async def help_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        uid = str(update.effective_user.id)
+        is_admin = uid == OWNER_ID
+        text = (
+            "📖 **BẢNG HƯỚNG DẪN SỬ DỤNG ELIT HUBT BOT**\n\n"
+            "🔍 **Quét & Theo Dõi Bài Tập**:\n"
+            "• `/check` hoặc `/quet`: Quét danh sách bài tập chưa nộp hôm nay.\n"
+            "• `/status`: Kiểm tra trạng thái Server VPS, RAM, CPU.\n\n"
+            "💡 **Giải Bài Tập Bằng AI**:\n"
+            "• `/solve <assignment_id>`: Tự động giải bài tập bằng Gemini AI.\n\n"
+            "📤 **Nộp bài & Quản lý Bài Nộp**:\n"
+            "• `/submit <assignment_id>`: Nộp file bài làm lên ELit HUBT.\n"
+            "• `/remove <assignment_id>`: Gỡ bài nộp trên Moodle.\n\n"
+            "👤 **Tài Khoản & Đăng Nhập**:\n"
+            "• `/login <msv> <mật_khẩu>`: Đăng nhập tài khoản MSV HUBT.\n"
+            "• `/whoami`: Xem tài khoản HUBT đang kết nối với bạn.\n"
+        )
+        if is_admin:
+            text += (
+                "\n🛠️ **Lệnh dành cho Admin**:\n"
+                "• `/admin`: Mở Dashboard Admin & Dọn dẹp rác VPS.\n"
+                "• `/bash pin <pin>` hoặc `/bash <câu_lệnh>`: Remote Terminal Web Shell.\n"
+            )
+        msg = update.message or (update.callback_query.message if update.callback_query else None)
+        if msg:
+            await msg.reply_text(text, parse_mode="Markdown", reply_markup=keyboards.main_menu(uid, is_admin))
 
     async def start_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid = str(update.effective_user.id)
@@ -257,8 +285,46 @@ class TelegramBotApp:
         query = update.callback_query
         data = query.data
         clicker_id = str(query.from_user.id)
+        msg = query.message
 
-        if data.startswith("remove_"):
+        if data == "btn_check":
+            await query.answer("🔍 Đang quét bài tập...")
+            dummy_update = Update(update.update_id, message=msg)
+            await self.check_cmd(dummy_update, context)
+
+        elif data == "btn_status":
+            await query.answer()
+            dummy_update = Update(update.update_id, message=msg)
+            await self.status_cmd(dummy_update, context)
+
+        elif data == "btn_solve_help":
+            await query.answer()
+            await msg.reply_text("💡 **GỢI Ý GIẢI BÀI TẬP BẰNG AI**\n\nVui lòng dùng lệnh: `/solve <ID_Bài_Tập>` (Ví dụ: `/solve 119340`)")
+
+        elif data == "btn_whoami":
+            await query.answer()
+            dummy_update = Update(update.update_id, message=msg)
+            await self.whoami_cmd(dummy_update, context)
+
+        elif data == "btn_admin_panel":
+            await query.answer()
+            dummy_update = Update(update.update_id, message=msg)
+            await self.admin_cmd(dummy_update, context)
+
+        elif data == "btn_bash_help":
+            await query.answer()
+            await msg.reply_text("💻 **REMOTE WEB SHELL**\n\nVui lòng dùng lệnh: `/bash pin <mã_pin>` để xác thực trước.")
+
+        elif data.startswith("submit_help:"):
+            aid = data.split(":")[1]
+            await query.answer()
+            await msg.reply_text(
+                f"📤 **HƯỚNG DẪN NỘP BÀI CHO BÀI TẬP #{aid}**\n\n"
+                f"Vui lòng gửi file bài làm trực tiếp vào Chat này kèm caption: `/submit {aid}`",
+                parse_mode="Markdown",
+            )
+
+        elif data.startswith("remove_"):
             parts = data.split("_")
             aid = parts[1]
             owner_id = parts[2] if len(parts) > 2 else ""
@@ -269,12 +335,14 @@ class TelegramBotApp:
 
             await query.answer()
             context.args = [aid]
-            await self.remove_cmd(update, context)
+            dummy_update = Update(update.update_id, message=msg)
+            await self.remove_cmd(dummy_update, context)
 
         elif data.startswith("ai_solve:"):
             aid = data.split(":")[1]
             await query.answer("⏳ Đang giải tự động bài tập bằng Gemini AI...")
             context.args = [aid]
-            await self.solve_cmd(update, context)
+            dummy_update = Update(update.update_id, message=msg)
+            await self.solve_cmd(dummy_update, context)
 
 bot_app = TelegramBotApp()

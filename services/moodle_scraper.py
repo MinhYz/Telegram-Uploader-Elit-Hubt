@@ -25,11 +25,11 @@ class MoodleScraperService:
         if circuit_breaker.is_open():
             raise CircuitBreakerOpenException("Circuit Breaker active due to continuous Moodle 5xx errors.")
 
-        context = await browser_pool.get_context(self.user_id)
-        page = await context.new_page()
-        await AntiBotStealth.apply_stealth(page)
-
+        page = None
         try:
+            context = await browser_pool.get_context(self.user_id)
+            page = await context.new_page()
+            await AntiBotStealth.apply_stealth(page)
             if token:
                 logger.info(f"Logging in user {self.user_id} via Session Token Cookie...")
                 await context.add_cookies([{

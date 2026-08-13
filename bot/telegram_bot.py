@@ -54,7 +54,21 @@ class TelegramBotApp:
         self.app.add_handler(MessageHandler(filters.VOICE, self.voice_cmd_handler))
         self.app.add_handler(MessageHandler(filters.ATTACHMENT, self.file_upload_handler))
 
+        # Global Error Handler
+        self.app.add_error_handler(self.global_error_handler)
+
         return self.app
+
+    async def global_error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE):
+        logger.error(f"Global Error Handler caught exception: {context.error}", exc_info=context.error)
+        if isinstance(update, Update) and update.effective_message:
+            try:
+                await update.effective_message.reply_text(
+                    f"❌ **ĐÃ XẢY RA LỖI HỆ THỐNG**: `{str(context.error)[:300]}`",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
 
     async def help_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid = str(update.effective_user.id)

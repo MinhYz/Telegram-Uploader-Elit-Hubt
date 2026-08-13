@@ -51,9 +51,9 @@ class MoodleScraperService:
             logger.info(f"Logging in user {self.user_id} via MSV credentials...")
             await page.goto(LOGIN_URL, wait_until="networkidle", timeout=30000)
             
-            username_sel = "input[name='username'], #username, input#username"
-            password_sel = "input[name='password'], #password, input#password"
-            login_btn_sel = "button[type='submit'], input[type='submit'], #loginbtn, button#loginbtn"
+            username_sel = "input[name='username'], #username"
+            password_sel = "input[name='password'], #password"
+            login_btn_sel = "#loginbtn, button[type='submit'], input[type='submit']"
 
             await AntiBotStealth.human_type(page, username_sel, username)
             await AntiBotStealth.human_type(page, password_sel, password)
@@ -66,8 +66,12 @@ class MoodleScraperService:
                 session_vault.save_session_state(self.user_id, state)
                 return True, f"Đăng nhập thành công tài khoản MSV `{username}`!"
             
-            err_elem = await DOMEngine.find_element(page, [".alert-danger", "#loginerrormessage"])
-            err_msg = await err_elem.inner_text() if err_elem else "Sai tên đăng nhập hoặc mật khẩu."
+            err_count = await page.locator(".alert-danger, #loginerrormessage, .loginerrors").count()
+            err_msg = "Sai tên đăng nhập hoặc mật khẩu."
+            if err_count > 0:
+                err_text = await page.locator(".alert-danger, #loginerrormessage, .loginerrors").first.text_content()
+                if err_text:
+                    err_msg = err_text.strip()
             return False, f"Đăng nhập thất bại: {err_msg}"
         except Exception as e:
             logger.error(f"Login error for {self.user_id}: {e}")

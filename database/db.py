@@ -63,6 +63,13 @@ class AsyncDatabase:
                     value TEXT
                 )
             """)
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS admins (
+                    user_id TEXT PRIMARY KEY,
+                    added_by TEXT,
+                    created_at REAL
+                )
+            """)
             await db.commit()
             logger.info(f"Database initialized at {self.db_path}")
 
@@ -148,19 +155,34 @@ class AsyncDatabase:
             ))
             await db.commit()
 
-    # System Config Key-Value Store
-    async def get_config(self, key: str, default: str = "") -> str:
-        async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute("SELECT value FROM system_config WHERE key = ?", (key,)) as cursor:
-                row = await cursor.fetchone()
-                return row[0] if row else default
-
-    async def set_config(self, key: str, value: str):
+    # Admin Operations
+    async def add_admin(self, user_id: str, added_by: str = "") -> bool:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
-                INSERT INTO system_config (key, value) VALUES (?, ?)
-                ON CONFLICT(key) DO UPDATE SET value = excluded.value
-            """, (key, value))
+                INSERT INTO admins (user_id, added_by, created_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id) DO NOTHING
+            """, (user_id, added_by, time.time()))
             await db.commit()
+            return True
+
+    async def remove_admin(self, user_id: str) -> bool:
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("DELETE FROM admins WHERE user_id = ?", (user_id,))
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def is_admin(self, user_id: str, owner_id: str = "") -> bool:
+        if owner_id and user_id == owner_id:
+            return True
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("SELECT 1 FROM admins WHERE user_id = ?", (user_id,)) as cursor:
+                return await cursor.fetchone() is not None
+
+    async def get_all_admins(self) -> List[str]:
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute("SELECT user_id FROM admins") as cursor:
+                rows = await cursor.fetchall()
+                return [r[0] for r in rows]
 
 db = AsyncDatabase()

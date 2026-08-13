@@ -31,6 +31,10 @@ class BotKeyboards:
         return InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("🔄 Làm mới", callback_data="btn_status"),
+                InlineKeyboardButton("🐧 Neofetch", callback_data="btn_neofetch"),
+                InlineKeyboardButton("⚡ Speedtest", callback_data="btn_speedtest"),
+            ],
+            [
                 InlineKeyboardButton("🔙 Quay về Menu chính", callback_data="btn_main_menu"),
             ]
         ])
@@ -40,6 +44,9 @@ class BotKeyboards:
         return InlineKeyboardMarkup([
             [
                 InlineKeyboardButton("🧹 Dọn rác VPS ngay", callback_data="btn_purge_cache"),
+                InlineKeyboardButton("👥 Danh sách Admin", callback_data="btn_admin_list"),
+            ],
+            [
                 InlineKeyboardButton("🔙 Quay về Menu chính", callback_data="btn_main_menu"),
             ]
         ])

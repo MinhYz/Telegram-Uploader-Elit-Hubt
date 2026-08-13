@@ -15,7 +15,7 @@ from bot.keyboards import keyboards
 from bot.voice_processor import voice_processor
 from bot.web_shell import web_shell
 from bot.quiet_hours import quiet_hours_mgr
-from utils.system_monitor import get_system_stats
+from utils.system_monitor import get_system_stats, get_neofetch_output, run_speedtest
 from utils.cleaner import storage_cleaner
 from utils.logger import logger
 
@@ -41,6 +41,11 @@ class TelegramBotApp:
         self.app.add_handler(CommandHandler("login", self.login_cmd))
         self.app.add_handler(CommandHandler("whoami", self.whoami_cmd))
         self.app.add_handler(CommandHandler("status", self.status_cmd))
+        self.app.add_handler(CommandHandler(["neofetch", "sysinfo"], self.neofetch_cmd))
+        self.app.add_handler(CommandHandler("speedtest", self.speedtest_cmd))
+        self.app.add_handler(CommandHandler("addadmin", self.add_admin_cmd))
+        self.app.add_handler(CommandHandler("deladmin", self.del_admin_cmd))
+        self.app.add_handler(CommandHandler("adminlist", self.admin_list_cmd))
         self.app.add_handler(CommandHandler(["admin", "panel"], self.admin_cmd))
         self.app.add_handler(CommandHandler("bash", self.bash_cmd))
 
@@ -53,12 +58,14 @@ class TelegramBotApp:
 
     async def help_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid = str(update.effective_user.id)
-        is_admin = uid == OWNER_ID
+        is_admin = await db.is_admin(uid, OWNER_ID)
         text = (
             "📖 **BẢNG HƯỚNG DẪN SỬ DỤNG ELIT HUBT BOT**\n\n"
             "🔍 **Quét & Theo Dõi Bài Tập**:\n"
             "• `/check` hoặc `/quet`: Quét danh sách bài tập chưa nộp hôm nay.\n"
-            "• `/status`: Kiểm tra trạng thái Server VPS, RAM, CPU.\n\n"
+            "• `/status`: Kiểm tra trạng thái Server VPS, RAM, CPU.\n"
+            "• `/neofetch`: Xem tổng quan hệ thống OS & Phần cứng.\n"
+            "• `/speedtest`: Đo tốc độ mạng VPS thực tế.\n\n"
             "💡 **Giải Bài Tập Bằng AI**:\n"
             "• `/solve <assignment_id>`: Tự động giải bài tập bằng Gemini AI.\n\n"
             "📤 **Nộp bài & Quản lý Bài Nộp**:\n"
@@ -70,8 +77,11 @@ class TelegramBotApp:
         )
         if is_admin:
             text += (
-                "\n🛠️ **Lệnh dành cho Admin**:\n"
+                "\n🛠️ **Lệnh Quản Trị Admin**:\n"
                 "• `/admin`: Mở Dashboard Admin & Dọn dẹp rác VPS.\n"
+                "• `/addadmin <user_id>` (hoặc reply): Thêm quyền Admin.\n"
+                "• `/deladmin <user_id>` (hoặc reply): Gỡ quyền Admin.\n"
+                "• `/adminlist`: Xem danh sách Owner & Admin hiện tại.\n"
                 "• `/bash pin <pin>` hoặc `/bash <câu_lệnh>`: Remote Terminal Web Shell.\n"
             )
         msg = update.message or (update.callback_query.message if update.callback_query else None)
@@ -80,7 +90,7 @@ class TelegramBotApp:
 
     async def start_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid = str(update.effective_user.id)
-        is_admin = uid == OWNER_ID
+        is_admin = await db.is_admin(uid, OWNER_ID)
         text = (
             "🤖 **HUBT Moodle Automation Framework (AIO)**\n\n"
             "Hệ thống tự động hóa ELit HUBT đa tính năng, bảo mật cao.\n"
@@ -244,11 +254,86 @@ class TelegramBotApp:
 
     async def admin_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid = str(update.effective_user.id)
-        if uid != OWNER_ID:
+        if not await db.is_admin(uid, OWNER_ID):
             await update.message.reply_text("⛔ Quyền truy cập bị từ chối!")
             return
         cleaned = storage_cleaner.purge_temp_files()
-        await update.message.reply_text(f"🛠️ **ADMIN DASHBOARD**\n\n✅ Đã tự động dọn dẹp `{cleaned}` file rác/temp khỏi VPS.")
+        await update.message.reply_text(f"🛠️ **ADMIN DASHBOARD**\n\n✅ Đã tự động dọn dẹp `{cleaned}` file rác/temp khỏi VPS.", reply_markup=keyboards.admin_menu())
+
+    async def neofetch_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        msg = update.effective_message
+        output = await get_neofetch_output()
+        await msg.reply_text(output, parse_mode="Markdown", reply_markup=keyboards.back_to_menu())
+
+    async def speedtest_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        msg = update.effective_message
+        status_msg = await msg.reply_text("⚡ **Đang đo tốc độ băng thông VPS...**", parse_mode="Markdown")
+        output = await run_speedtest()
+        await status_msg.edit_text(output, parse_mode="Markdown", reply_markup=keyboards.back_to_menu())
+
+    async def add_admin_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        msg = update.effective_message
+        uid = str(update.effective_user.id)
+        if not await db.is_admin(uid, OWNER_ID):
+            await msg.reply_text("⛔ Quyền truy cập bị từ chối!")
+            return
+
+        target_id = None
+        if msg.reply_to_message and msg.reply_to_message.from_user:
+            target_id = str(msg.reply_to_message.from_user.id)
+        elif context.args:
+            target_id = context.args[0]
+
+        if not target_id:
+            await msg.reply_text("⚠️ **Cú pháp**: `/addadmin <user_id>` hoặc **reply tin nhắn** của người cần thêm Admin.")
+            return
+
+        await db.add_admin(target_id, added_by=uid)
+        await msg.reply_text(f"✅ **Đã cấp quyền Admin thành công cho User ID**: `{target_id}`", parse_mode="Markdown")
+
+    async def del_admin_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        msg = update.effective_message
+        uid = str(update.effective_user.id)
+        if not await db.is_admin(uid, OWNER_ID):
+            await msg.reply_text("⛔ Quyền truy cập bị từ chối!")
+            return
+
+        target_id = None
+        if msg.reply_to_message and msg.reply_to_message.from_user:
+            target_id = str(msg.reply_to_message.from_user.id)
+        elif context.args:
+            target_id = context.args[0]
+
+        if not target_id:
+            await msg.reply_text("⚠️ **Cú pháp**: `/deladmin <user_id>` hoặc **reply tin nhắn** của Admin cần gỡ quyền.")
+            return
+
+        if target_id == OWNER_ID:
+            await msg.reply_text("❌ Không thể gỡ quyền Admin của hệ thống Owner!")
+            return
+
+        ok = await db.remove_admin(target_id)
+        if ok:
+            await msg.reply_text(f"✅ **Đã gỡ quyền Admin thành công cho User ID**: `{target_id}`", parse_mode="Markdown")
+        else:
+            await msg.reply_text(f"⚠️ User ID `{target_id}` hiện không nằm trong danh sách Admin.")
+
+    async def admin_list_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        msg = update.effective_message
+        uid = str(update.effective_user.id)
+        if not await db.is_admin(uid, OWNER_ID):
+            await msg.reply_text("⛔ Quyền truy cập bị từ chối!")
+            return
+
+        admins = await db.get_all_admins()
+        admin_strs = [f"• `{a}`" for a in admins]
+        text = (
+            f"👑 **DANH SÁCH OWNER & ADMIN HỆ THỐNG**\n\n"
+            f"• **Owner System**: `{OWNER_ID}`\n"
+            f"• **Danh sách Admin (`{len(admins)}`)**:\n"
+            + ("\n".join(admin_strs) if admin_strs else "*(Chưa có Admin bổ sung)*")
+        )
+        await msg.reply_text(text, parse_mode="Markdown", reply_markup=keyboards.back_to_menu())
 
     async def bash_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid = str(update.effective_user.id)
@@ -285,7 +370,7 @@ class TelegramBotApp:
         query = update.callback_query
         data = query.data
         clicker_id = str(query.from_user.id)
-        is_admin = clicker_id == OWNER_ID
+        is_admin = await db.is_admin(clicker_id, OWNER_ID)
 
         if data == "btn_main_menu":
             await query.answer()
@@ -295,6 +380,32 @@ class TelegramBotApp:
                 "Vui lòng chọn thao tác từ Menu bên dưới:"
             )
             await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboards.main_menu(clicker_id, is_admin))
+
+        elif data == "btn_neofetch":
+            await query.answer("🐧 Đang lấy thông tin Neofetch...")
+            output = await get_neofetch_output()
+            await query.edit_message_text(output, parse_mode="Markdown", reply_markup=keyboards.back_to_menu())
+
+        elif data == "btn_speedtest":
+            await query.answer("⚡ Đang kiểm tra tốc độ...")
+            await query.edit_message_text("⚡ **Đang đo tốc độ mạng VPS...**", parse_mode="Markdown")
+            output = await run_speedtest()
+            await query.edit_message_text(output, parse_mode="Markdown", reply_markup=keyboards.back_to_menu())
+
+        elif data == "btn_admin_list":
+            if not is_admin:
+                await query.answer("⛔ Quyền truy cập bị từ chối!", show_alert=True)
+                return
+            await query.answer()
+            admins = await db.get_all_admins()
+            admin_strs = [f"• `{a}`" for a in admins]
+            text = (
+                f"👑 **DANH SÁCH OWNER & ADMIN HỆ THỐNG**\n\n"
+                f"• **Owner System**: `{OWNER_ID}`\n"
+                f"• **Danh sách Admin (`{len(admins)}`)**:\n"
+                + ("\n".join(admin_strs) if admin_strs else "*(Chưa có Admin bổ sung)*")
+            )
+            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboards.back_to_menu())
 
         elif data == "btn_check":
             await query.answer("🔍 Đang quét bài tập...")
@@ -370,7 +481,7 @@ class TelegramBotApp:
             await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboards.back_to_menu())
 
         elif data == "btn_admin_panel":
-            if clicker_id != OWNER_ID:
+            if not is_admin:
                 await query.answer("⛔ ⚠️ BẠN KHÔNG CÓ QUYỀN TRUY CẬP ADMIN DASHBOARD!", show_alert=True)
                 return
             await query.answer()
@@ -378,13 +489,16 @@ class TelegramBotApp:
                 f"🛠️ **ADMIN DASHBOARD CONTROL PANEL**\n\n"
                 f"• **Owner Telegram ID**: `{OWNER_ID}`\n"
                 f"• **Quyền hạn**: System Privileges / Server Host\n"
+                f"• **Thêm Admin**: `/addadmin <id>` (hoặc reply)\n"
+                f"• **Gỡ Admin**: `/deladmin <id>` (hoặc reply)\n"
+                f"• **Danh sách Admin**: `/adminlist`\n"
                 f"• **Lệnh Terminal**: `/bash pin <pin>` hoặc `/bash <câu_lệnh>`\n\n"
                 f"Nhấn nút bên dưới để dọn dẹp rác bộ nhớ VPS ngay lập tức:"
             )
             await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboards.admin_menu())
 
         elif data == "btn_purge_cache":
-            if clicker_id != OWNER_ID:
+            if not is_admin:
                 await query.answer("⛔ Quyền truy cập bị từ chối!", show_alert=True)
                 return
             cleaned = storage_cleaner.purge_temp_files()

@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, BotCommand, MenuButtonCommands
 from telegram.ext import (
+    Application,
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,

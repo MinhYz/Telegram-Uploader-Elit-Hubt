@@ -19,9 +19,17 @@ class AntiBotStealth:
         logger.debug("Applied AntiBotStealth scripts to Playwright Page.")
 
     @staticmethod
-    async def human_type(page: Page, selector: str, text: str, min_delay_ms: int = 50, max_delay_ms: int = 150):
-        """Type text into field with randomized human keystroke delays (50-150ms)."""
-        element = await page.query_selector(selector)
+    async def human_type(page: Page, selector: str, text: str, min_delay_ms: int = 30, max_delay_ms: int = 100):
+        """Type text into field with randomized human keystroke delays (30-100ms)."""
+        element = None
+        try:
+            element = await page.wait_for_selector(selector, timeout=10000, state="visible")
+        except Exception:
+            pass
+
+        if not element:
+            element = await page.query_selector(selector)
+
         if not element:
             raise ValueError(f"Target element not found for human typing: {selector}")
         
@@ -35,15 +43,26 @@ class AntiBotStealth:
     @staticmethod
     async def human_move_and_click(page: Page, selector: str):
         """Move cursor naturally and click element."""
-        element = await page.query_selector(selector)
+        element = None
+        try:
+            element = await page.wait_for_selector(selector, timeout=10000, state="visible")
+        except Exception:
+            pass
+
+        if not element:
+            element = await page.query_selector(selector)
+
         if element:
-            box = await element.bounding_box()
-            if box:
-                # Randomize click position inside element bounds
-                x = box["x"] + box["width"] * random.uniform(0.2, 0.8)
-                y = box["y"] + box["height"] * random.uniform(0.2, 0.8)
-                await page.mouse.move(x, y, steps=random.randint(5, 15))
-                await asyncio.sleep(random.uniform(0.05, 0.2))
-                await page.mouse.click(x, y)
-                return
-        await page.click(selector)
+            try:
+                box = await element.bounding_box()
+                if box:
+                    x = box["x"] + box["width"] * random.uniform(0.2, 0.8)
+                    y = box["y"] + box["height"] * random.uniform(0.2, 0.8)
+                    await page.mouse.move(x, y, steps=random.randint(5, 15))
+                    await page.mouse.click(x, y)
+                else:
+                    await element.click()
+            except Exception:
+                await element.click()
+        else:
+            await page.click(selector)

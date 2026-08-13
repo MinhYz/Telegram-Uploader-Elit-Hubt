@@ -51,9 +51,13 @@ class MoodleScraperService:
             logger.info(f"Logging in user {self.user_id} via MSV credentials...")
             await page.goto(LOGIN_URL, wait_until="networkidle", timeout=30000)
             
-            await AntiBotStealth.human_type(page, "input#username", username)
-            await AntiBotStealth.human_type(page, "input#password", password)
-            await AntiBotStealth.human_move_and_click(page, "button#loginbtn, input#loginbtn")
+            username_sel = "input[name='username'], #username, input#username"
+            password_sel = "input[name='password'], #password, input#password"
+            login_btn_sel = "button[type='submit'], input[type='submit'], #loginbtn, button#loginbtn"
+
+            await AntiBotStealth.human_type(page, username_sel, username)
+            await AntiBotStealth.human_type(page, password_sel, password)
+            await AntiBotStealth.human_move_and_click(page, login_btn_sel)
             
             await page.wait_for_load_state("networkidle", timeout=30000)
 

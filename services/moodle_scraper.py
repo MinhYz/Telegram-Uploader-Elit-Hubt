@@ -59,30 +59,59 @@ class MoodleScraperService:
             await AntiBotStealth.human_type(page, password_sel, password)
             await AntiBotStealth.human_move_and_click(page, login_btn_sel)
             
-            await page.wait_for_load_state("networkidle", timeout=30000)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=15000)
+            except Exception:
+                pass
 
             if await self._is_logged_in(page):
                 state = await context.storage_state()
                 session_vault.save_session_state(self.user_id, state)
-                return True, f"Đăng nhập thành công tài khoản MSV `{username}`!"
-            
-            err_count = await page.locator(".alert-danger, #loginerrormessage, .loginerrors").count()
-            err_msg = "Sai tên đăng nhập hoặc mật khẩu."
+                return True, f"✅ Đăng nhập thành công tài khoản MSV `{username}`!"
+
+            await asyncio.sleep(2)
+            if await self._is_logged_in(page):
+                state = await context.storage_state()
+                session_vault.save_session_state(self.user_id, state)
+                return True, f"✅ Đăng nhập thành công tài khoản MSV `{username}`!"
+
+            # Attempt verification via Portal navigation
+            try:
+                await page.goto(PORTAL_URL, wait_until="networkidle", timeout=10000)
+                if await self._is_logged_in(page):
+                    state = await context.storage_state()
+                    session_vault.save_session_state(self.user_id, state)
+                    return True, f"✅ Đăng nhập thành công tài khoản MSV `{username}`!"
+            except Exception:
+                pass
+
+            err_count = await page.locator(".alert-danger, #loginerrormessage, .loginerrors, .error").count()
+            err_msg = "Tên đăng nhập (MSV) hoặc mật khẩu không chính xác."
             if err_count > 0:
-                err_text = await page.locator(".alert-danger, #loginerrormessage, .loginerrors").first.text_content()
+                err_text = await page.locator(".alert-danger, #loginerrormessage, .loginerrors, .error").first.text_content()
                 if err_text:
                     err_msg = err_text.strip()
-            return False, f"Đăng nhập thất bại: {err_msg}"
+            return False, f"❌ Đăng nhập thất bại: {err_msg}"
         except Exception as e:
             logger.error(f"Login error for {self.user_id}: {e}")
             return False, f"Lỗi trong quá trình đăng nhập: {str(e)}"
         finally:
-            await page.close()
+            if page and not page.is_closed():
+                await page.close()
 
     async def _is_logged_in(self, page) -> bool:
-        if page.url.startswith(LOGIN_URL):
+        if not page or page.is_closed():
             return False
-        return await page.query_selector("a[href*='login/logout.php'], .userbutton, .userpicture") is not None
+        try:
+            url = page.url
+            if "login/index.php" not in url:
+                return True
+            count = await page.locator("a[href*='login/logout.php'], .userbutton, .userpicture, .usermenu").count()
+            if count > 0:
+                return True
+        except Exception:
+            pass
+        return False
 
     async def check_today_classes_and_assignments(self) -> List[Dict[str, Any]]:
         if circuit_breaker.is_open():

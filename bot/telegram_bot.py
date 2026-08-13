@@ -216,26 +216,36 @@ class TelegramBotApp:
         uid = str(update.effective_user.id)
         msg = update.message
         args = context.args
-        await msg.delete() # Security: Delete credentials message immediately
+        chat_id = msg.chat_id if msg else update.effective_chat.id
+
+        # Security: Try deleting raw credentials message
+        try:
+            if msg:
+                await msg.delete()
+        except Exception:
+            pass
 
         if len(args) == 2:
             msv, password = args[0], args[1]
+            status_msg = await context.bot.send_message(chat_id=chat_id, text=f"⏳ **Đang tiến hành đăng nhập tài khoản MSV `{msv}` lên ELit HUBT...**", parse_mode="Markdown")
             scraper = MoodleScraperService(uid)
             ok, res = await scraper.login(username=msv, password=password)
             if ok:
                 await db.save_user(uid, msv=msv, password=password)
-            await context.bot.send_message(chat_id=uid, text=res)
+            await status_msg.edit_text(res, parse_mode="Markdown")
         elif len(args) == 1:
             token = args[0]
+            status_msg = await context.bot.send_message(chat_id=chat_id, text="⏳ **Đang tiến hành xác thực bằng Token Session Cookie...**", parse_mode="Markdown")
             scraper = MoodleScraperService(uid)
             ok, res = await scraper.login(token=token)
             if ok:
                 await db.save_user(uid, token=token)
-            await context.bot.send_message(chat_id=uid, text=res)
+            await status_msg.edit_text(res, parse_mode="Markdown")
         else:
             await context.bot.send_message(
-                chat_id=uid,
-                text="🔑 Cú pháp: `/login <msv> <mật_khẩu>` hoặc `/login <token_cookie>`"
+                chat_id=chat_id,
+                text="🔑 Cú pháp đăng nhập:\n• `/login <msv> <mật_khẩu>`\n• `/login <token_cookie>`",
+                parse_mode="Markdown"
             )
 
     async def whoami_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):

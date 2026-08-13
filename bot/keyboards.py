@@ -21,6 +21,30 @@ class BotKeyboards:
         return InlineKeyboardMarkup(keyboard)
 
     @staticmethod
+    def back_to_menu() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 Quay về Menu chính", callback_data="btn_main_menu")]
+        ])
+
+    @staticmethod
+    def status_menu() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🔄 Làm mới", callback_data="btn_status"),
+                InlineKeyboardButton("🔙 Quay về Menu chính", callback_data="btn_main_menu"),
+            ]
+        ])
+
+    @staticmethod
+    def admin_menu() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🧹 Dọn rác VPS ngay", callback_data="btn_purge_cache"),
+                InlineKeyboardButton("🔙 Quay về Menu chính", callback_data="btn_main_menu"),
+            ]
+        ])
+
+    @staticmethod
     def assignment_action(assign_id: str, is_submitted: bool, owner_user_id: str) -> InlineKeyboardMarkup:
         row = []
         row.append(InlineKeyboardButton("📥 Tải đề bài", callback_data=f"download_materials:{assign_id}"))
@@ -31,14 +55,5 @@ class BotKeyboards:
         else:
             row.append(InlineKeyboardButton("📤 Nộp bài", callback_data=f"submit_help:{assign_id}"))
         return InlineKeyboardMarkup([row])
-
-    @staticmethod
-    def patch_approval(patch_id: str) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("🛠️ Áp dụng Patch & Khởi động lại", callback_data=f"apply_patch_{patch_id}"),
-                InlineKeyboardButton("❌ Bỏ qua Patch", callback_data="reject_patch"),
-            ]
-        ])
 
 keyboards = BotKeyboards()

@@ -285,44 +285,129 @@ class TelegramBotApp:
         query = update.callback_query
         data = query.data
         clicker_id = str(query.from_user.id)
-        msg = query.message
+        is_admin = clicker_id == OWNER_ID
 
-        if data == "btn_check":
+        if data == "btn_main_menu":
+            await query.answer()
+            text = (
+                "🤖 **HUBT Moodle Automation Framework (AIO)**\n\n"
+                "Hệ thống tự động hóa ELit HUBT đa tính năng, bảo mật cao.\n"
+                "Vui lòng chọn thao tác từ Menu bên dưới:"
+            )
+            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboards.main_menu(clicker_id, is_admin))
+
+        elif data == "btn_check":
             await query.answer("🔍 Đang quét bài tập...")
-            dummy_update = Update(update.update_id, message=msg)
-            await self.check_cmd(dummy_update, context)
+            await query.edit_message_text("⏳ **Đang mở Playwright quét lớp học & bài tập hôm nay trên ELit HUBT...**", parse_mode="Markdown")
+            scraper = MoodleScraperService(clicker_id)
+            try:
+                assignments = await scraper.check_today_classes_and_assignments()
+                if not assignments:
+                    await query.edit_message_text("🎉 **Hôm nay không có bài tập mới nào chưa nộp!**", reply_markup=keyboards.back_to_menu())
+                    return
+
+                await query.message.reply_text(f"📋 **Phát hiện `{len(assignments)}` bài tập hôm nay:**")
+                for a in assignments:
+                    aid = a["assignment_id"]
+                    txt = (
+                        f"📌 **Bài tập #{aid}**\n"
+                        f"📘 **Môn**: {a['course_name']}\n"
+                        f"📝 **Tiêu đề**: {a['title']}\n"
+                        f"📊 **Trạng thái**: {a['status']}\n"
+                        f"⏳ **Thời gian còn lại**: {a['time_remaining']}\n"
+                        f"🔗 [Xem trên ELit]({a['url']})"
+                    )
+                    await query.message.reply_text(
+                        txt,
+                        parse_mode="Markdown",
+                        reply_markup=keyboards.assignment_action(aid, a["is_submitted"], clicker_id),
+                    )
+                    await db.mark_assignment_seen(aid, a)
+            except Exception as e:
+                logger.error(f"Check command error: {e}")
+                await query.edit_message_text(f"❌ **Lỗi khi quét bài tập**: {str(e)}", reply_markup=keyboards.back_to_menu())
 
         elif data == "btn_status":
             await query.answer()
-            dummy_update = Update(update.update_id, message=msg)
-            await self.status_cmd(dummy_update, context)
+            stats = get_system_stats()
+            text = (
+                f"📊 **HỆ THỐNG VPS ORACLE CLOUD MONITOR**\n\n"
+                f"• **PID Process**: `{stats['pid']}`\n"
+                f"• **Uptime**: `{stats['uptime']}`\n"
+                f"• **CPU Usage**: `{stats['cpu_percent']}%`\n"
+                f"• **RAM Usage**: `{stats['ram_used_mb']} MB / {stats['ram_total_mb']} MB` (`{stats['ram_percent']}%`)\n"
+                f"• **Swap Usage**: `{stats['swap_used_mb']} MB / {stats['swap_total_mb']} MB` (`{stats['swap_percent']}%`)\n"
+                f"• **Process RAM**: `{stats['process_ram_mb']} MB` (Target < 300MB)\n"
+                f"• **Disk Free**: `{stats['disk_free_gb']} GB` (`{stats['disk_percent']}%` dùng)"
+            )
+            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboards.status_menu())
 
         elif data == "btn_solve_help":
             await query.answer()
-            await msg.reply_text("💡 **GỢI Ý GIẢI BÀI TẬP BẰNG AI**\n\nVui lòng dùng lệnh: `/solve <ID_Bài_Tập>` (Ví dụ: `/solve 119340`)")
+            text = (
+                "💡 **GIẢI BÀI TẬP TỰ ĐỘNG BẰNG AI GEMINI**\n\n"
+                "Hệ thống sẽ tự đọc đề bài PDF/Word và xuất file bài làm chuẩn công thức HUBT.\n\n"
+                "👉 **Cú pháp**: `/solve <ID_Bài_Tập>`\n"
+                "*(Ví dụ: `/solve 119340` hoặc reply lệnh `/solve` vào tin nhắn bài tập)*"
+            )
+            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboards.back_to_menu())
 
         elif data == "btn_whoami":
             await query.answer()
-            dummy_update = Update(update.update_id, message=msg)
-            await self.whoami_cmd(dummy_update, context)
+            user_info = await db.get_user(clicker_id)
+            if user_info:
+                text = (
+                    f"👤 **THÔNG TIN TÀI KHOẢN KẾT NỐI**\n\n"
+                    f"• **Telegram ID**: `{clicker_id}`\n"
+                    f"• **MSV HUBT**: `{user_info.get('msv', 'N/A')}`\n"
+                    f"• **Trạng thái Session**: ✅ Đã lưu encrypted session token"
+                )
+            else:
+                text = (
+                    "⚠️ **BẠN CHƯA ĐĂNG NHẬP TÀI KHOẢN HUBT**\n\n"
+                    "Vui lòng gửi lệnh trong ô Chat:\n`/login <msv> <mật_khẩu>` hoặc `/login <token_cookie>`"
+                )
+            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboards.back_to_menu())
 
         elif data == "btn_admin_panel":
+            if clicker_id != OWNER_ID:
+                await query.answer("⛔ ⚠️ BẠN KHÔNG CÓ QUYỀN TRUY CẬP ADMIN DASHBOARD!", show_alert=True)
+                return
             await query.answer()
-            dummy_update = Update(update.update_id, message=msg)
-            await self.admin_cmd(dummy_update, context)
+            text = (
+                f"🛠️ **ADMIN DASHBOARD CONTROL PANEL**\n\n"
+                f"• **Owner Telegram ID**: `{OWNER_ID}`\n"
+                f"• **Quyền hạn**: System Privileges / Server Host\n"
+                f"• **Lệnh Terminal**: `/bash pin <pin>` hoặc `/bash <câu_lệnh>`\n\n"
+                f"Nhấn nút bên dưới để dọn dẹp rác bộ nhớ VPS ngay lập tức:"
+            )
+            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboards.admin_menu())
+
+        elif data == "btn_purge_cache":
+            if clicker_id != OWNER_ID:
+                await query.answer("⛔ Quyền truy cập bị từ chối!", show_alert=True)
+                return
+            cleaned = storage_cleaner.purge_temp_files()
+            await query.answer(f"✅ Đã dọn dẹp {cleaned} file rác khỏi VPS!", show_alert=True)
 
         elif data == "btn_bash_help":
             await query.answer()
-            await msg.reply_text("💻 **REMOTE WEB SHELL**\n\nVui lòng dùng lệnh: `/bash pin <mã_pin>` để xác thực trước.")
+            text = (
+                "💻 **REMOTE TERMINAL WEB SHELL (/bash)**\n\n"
+                "Cho phép thực thi câu lệnh Terminal trực tiếp trên VPS (Bảo vệ bằng PIN 2FA).\n\n"
+                "👉 **Xác thực 2FA**: `/bash pin <mã_pin>`\n"
+                "👉 **Thực thi lệnh**: `/bash <câu_lệnh>` (Ví dụ: `/bash ls -la`)"
+            )
+            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboards.back_to_menu())
 
         elif data.startswith("submit_help:"):
             aid = data.split(":")[1]
             await query.answer()
-            await msg.reply_text(
+            text = (
                 f"📤 **HƯỚNG DẪN NỘP BÀI CHO BÀI TẬP #{aid}**\n\n"
-                f"Vui lòng gửi file bài làm trực tiếp vào Chat này kèm caption: `/submit {aid}`",
-                parse_mode="Markdown",
+                f"Vui lòng gửi file bài làm trực tiếp vào Chat này kèm caption: `/submit {aid}`"
             )
+            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboards.back_to_menu())
 
         elif data.startswith("remove_"):
             parts = data.split("_")
@@ -335,14 +420,14 @@ class TelegramBotApp:
 
             await query.answer()
             context.args = [aid]
-            dummy_update = Update(update.update_id, message=msg)
+            dummy_update = Update(update.update_id, message=query.message)
             await self.remove_cmd(dummy_update, context)
 
         elif data.startswith("ai_solve:"):
             aid = data.split(":")[1]
             await query.answer("⏳ Đang giải tự động bài tập bằng Gemini AI...")
             context.args = [aid]
-            dummy_update = Update(update.update_id, message=msg)
+            dummy_update = Update(update.update_id, message=query.message)
             await self.solve_cmd(dummy_update, context)
 
 bot_app = TelegramBotApp()

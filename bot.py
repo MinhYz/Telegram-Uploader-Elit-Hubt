@@ -595,7 +595,7 @@ async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             if assign["is_submitted"]:
                 button_row.append(
-                    InlineKeyboardButton("🗑️ Xóa bài đã nộp", callback_data=f"remove_{assign_id}")
+                    InlineKeyboardButton("🗑️ Xóa bài đã nộp", callback_data=f"remove_{assign_id}_{user_id}")
                 )
             else:
                 button_row.append(
@@ -654,9 +654,11 @@ async def solve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     # Automatically download assignment material files from Moodle if not fetched yet
+    user_id = str(update.effective_user.id) if update.effective_user else ""
+    scr, mgr = get_user_scraper(user_id)
     material_files = []
     try:
-        material_files = await scraper.download_assignment_materials(assign_id)
+        material_files = await scr.download_assignment_materials(assign_id)
     except Exception as ex:
         logger.warning(f"Note downloading materials for #{assign_id}: {ex}")
 
@@ -839,12 +841,14 @@ async def process_submission(bot, chat_id, documents, caption, reply_msg, msg):
         )
 
         # Execute submission workflow in Playwright
-        success, sub_msg, screenshot_path = await scraper.submit_assignment(
+        user_id = str(msg.from_user.id) if msg.from_user else ""
+        scr, mgr = get_user_scraper(user_id)
+        success, sub_msg, screenshot_path = await scr.submit_assignment(
             assignment_id=assign_id, file_paths=local_file_paths
         )
 
         if success:
-            remove_button = InlineKeyboardMarkup([[InlineKeyboardButton("🗑️ Xóa bài làm đã nộp", callback_data=f"remove_{assign_id}")]])
+            remove_button = InlineKeyboardMarkup([[InlineKeyboardButton("🗑️ Xóa bài làm đã nộp", callback_data=f"remove_{assign_id}_{user_id}")]])
             await status_msg.edit_text(
                 f"🎉 **NỘP BÀI TẬP #{assign_id} THÀNH CÔNG!**\n\n"
                 f"• **Số lượng file**: `{len(local_file_paths)}`\n"
@@ -1156,8 +1160,10 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data.startswith("download_materials:"):
         assign_id = data.split(":")[1]
         msg = await query.message.reply_text(f"⏳ Đang tải file đề bài đính kèm cho Bài tập #{assign_id}...")
+        user_id = str(query.from_user.id) if query.from_user else ""
+        scr, mgr = get_user_scraper(user_id)
         try:
-            files = await scraper.download_assignment_materials(assign_id)
+            files = await scr.download_assignment_materials(assign_id)
             if not files:
                 await msg.edit_text(f"⚠️ Không tải được file đề bài nào cho Bài tập #{assign_id}.")
             else:
@@ -1199,15 +1205,29 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
             await query.message.reply_text(f"⚠️ Không tìm thấy file bài làm đã giải cho Bài tập #{assign_id}. Vui lòng dùng lệnh `/solve {assign_id}` trước.")
             return
 
+        user_id = str(query.from_user.id) if query.from_user else ""
+        scr, mgr = get_user_scraper(user_id)
         status_msg = await query.message.reply_text(f"⏳ **Đang tiến hành tự động nộp file `{completed_file.name}` lên ELit HUBT...**")
-        success, message = await scraper.submit_assignment(assign_id, [completed_file])
+        success, message = await scr.submit_assignment(assign_id, [completed_file])
         if success:
             await status_msg.edit_text(f"🎉 **NỘP BÀI THÀNH CÔNG CHO BÀI TẬP #{assign_id}!**\n\n{message}", parse_mode="Markdown")
         else:
             await status_msg.edit_text(f"❌ **NỘP BÀI THẤT BẠI FOR BÀI TẬP #{assign_id}**\n\n{message}", parse_mode="Markdown")
 
     elif data.startswith("remove_"):
-        assign_id = data.split("_")[1]
+        parts = data.split("_")
+        assign_id = parts[1]
+        owner_id = parts[2] if len(parts) > 2 else None
+        clicker_id = str(query.from_user.id) if query.from_user else ""
+
+        # Permission Check: Block strangers from deleting other users' submissions
+        if owner_id and clicker_id != owner_id and not admin_store.is_admin(clicker_id):
+            await query.answer(
+                "⛔ ⚠️ BẠN KHÔNG CÓ QUYỀN!\n\nBài nộp này thuộc về tài khoản của người khác. Bạn không thể thao tác xóa!",
+                show_alert=True,
+            )
+            return
+
         confirm_text = (
             f"⚠️ **XÁC NHẬN XÓA BÀI NỘP**\n\n"
             f"Bạn có chắc chắn muốn **XÓA BÀI NỘP** cho **Bài tập #{assign_id}** trên ELit HUBT không?\n"
@@ -1215,20 +1235,46 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         )
         buttons = [
             [
-                InlineKeyboardButton("✅ Đồng ý Xóa", callback_data=f"confirm_remove_{assign_id}"),
+                InlineKeyboardButton("✅ Đồng ý Xóa", callback_data=f"confirm_remove_{assign_id}_{clicker_id}"),
                 InlineKeyboardButton("❌ Hủy", callback_data="cancel_remove"),
             ]
         ]
         await query.message.reply_text(confirm_text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
     elif data.startswith("confirm_remove_"):
-        assign_id = data.split("_")[2]
+        parts = data.split("_")
+        assign_id = parts[2]
+        owner_id = parts[3] if len(parts) > 3 else None
+        clicker_id = str(query.from_user.id) if query.from_user else ""
+
+        # Permission Check: Block strangers from confirming delete
+        if owner_id and clicker_id != owner_id and not admin_store.is_admin(clicker_id):
+            await query.answer(
+                "⛔ ⚠️ BẠN KHÔNG CÓ QUYỀN!\n\nBài nộp này thuộc về tài khoản của người khác. Bạn không thể thao tác xóa!",
+                show_alert=True,
+            )
+            return
+
         status_msg = await query.message.reply_text(f"⏳ **Đang tiến hành xóa bài nộp cho Bài tập #{assign_id}...**")
-        success, msg_result = await scraper.remove_submission(assign_id)
-        if success:
-            await status_msg.edit_text(f"✅ **ĐÃ XÓA BÀI NỘP THÀNH CÔNG!**\n\n{msg_result}", parse_mode="Markdown")
-        else:
-            await status_msg.edit_text(f"❌ **XÓA BÀI NỘP THẤT BẠI**: {msg_result}", parse_mode="Markdown")
+        scr, mgr = get_user_scraper(clicker_id)
+        try:
+            success, msg_result, screenshot_path = await scr.remove_assignment_submission(assign_id)
+            if success:
+                await status_msg.edit_text(f"✅ **ĐÃ XÓA BÀI NỘP THÀNH CÔNG!**\n\n{msg_result}", parse_mode="Markdown")
+                if screenshot_path and screenshot_path.exists():
+                    with open(screenshot_path, "rb") as f:
+                        await context.bot.send_photo(
+                            chat_id=chat_id,
+                            photo=InputFile(f),
+                            caption=f"📸 **Xác nhận trạng thái sau khi xóa bài nộp cho Bài tập #{assign_id} trên ELit HUBT**",
+                        )
+            else:
+                await status_msg.edit_text(f"❌ **XÓA BÀI NỘP THẤT BẠI**: {msg_result}", parse_mode="Markdown")
+        except SessionExpiredException:
+            await status_msg.edit_text("❌ **Phiên đăng nhập hết hạn.** Vui lòng dùng lệnh `/login` để đăng nhập lại.", parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"Error removing submission for assignment {assign_id}: {e}", exc_info=True)
+            await status_msg.edit_text(f"❌ **LỖI KHI XÓA BÀI NỘP**: {str(e)}", parse_mode="Markdown")
 
     elif data == "cancel_remove":
         await query.edit_message_text("❌ **Đã hủy thao tác xóa bài nộp.**", parse_mode="Markdown")
@@ -1275,7 +1321,7 @@ async def remove_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     buttons = [
         [
-            InlineKeyboardButton("✅ Đồng ý Xóa", callback_data=f"confirm_remove_{assign_id}"),
+            InlineKeyboardButton("✅ Đồng ý Xóa", callback_data=f"confirm_remove_{assign_id}_{user_id}"),
             InlineKeyboardButton("❌ Hủy", callback_data="cancel_remove"),
         ]
     ]

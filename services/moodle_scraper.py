@@ -20,7 +20,9 @@ class SessionExpiredException(Exception):
 class MoodleScraperService:
     def __init__(self, user_id: str = "default"):
         self.user_id = user_id
-        self.storage_state_path = session_vault.get_session_file(user_id)
+
+    def get_storage_state(self) -> Optional[Dict[str, Any]]:
+        return session_vault.load_session_state(self.user_id)
 
     async def login(self, username: str = "", password: str = "", token: str = "") -> Tuple[bool, str]:
         if circuit_breaker.is_open():
@@ -118,7 +120,7 @@ class MoodleScraperService:
         if circuit_breaker.is_open():
             raise CircuitBreakerOpenException("Circuit Breaker active.")
 
-        context = await browser_pool.get_context(self.user_id, str(self.storage_state_path))
+        context = await browser_pool.get_context(self.user_id, self.get_storage_state())
         page = await context.new_page()
         await AntiBotStealth.apply_stealth(page)
 
@@ -312,7 +314,7 @@ class MoodleScraperService:
 
     async def download_assignment_materials(self, assignment_id: str) -> List[Path]:
         """Fetch and download homework files on demand when user clicks download button."""
-        context = await browser_pool.get_context(self.user_id, str(self.storage_state_path))
+        context = await browser_pool.get_context(self.user_id, self.get_storage_state())
         page = await context.new_page()
         await AntiBotStealth.apply_stealth(page)
         downloaded_paths = []
@@ -359,7 +361,7 @@ class MoodleScraperService:
 
 
     async def submit_assignment(self, assignment_id: str, file_paths: List[Path]) -> Tuple[bool, str, Optional[Path]]:
-        context = await browser_pool.get_context(self.user_id, str(self.storage_state_path))
+        context = await browser_pool.get_context(self.user_id, self.get_storage_state())
         page = await context.new_page()
         await AntiBotStealth.apply_stealth(page)
         screenshot_path = SCREENSHOT_DIR / f"submit_{assignment_id}_{int(time.time())}.png"
@@ -391,7 +393,7 @@ class MoodleScraperService:
             await page.close()
 
     async def remove_assignment_submission(self, assignment_id: str) -> Tuple[bool, str, Optional[Path]]:
-        context = await browser_pool.get_context(self.user_id, str(self.storage_state_path))
+        context = await browser_pool.get_context(self.user_id, self.get_storage_state())
         page = await context.new_page()
         await AntiBotStealth.apply_stealth(page)
         screenshot_path = SCREENSHOT_DIR / f"remove_{assignment_id}.png"
@@ -422,7 +424,7 @@ class MoodleScraperService:
 
     async def instant_auto_attendance(self, attendance_id: str) -> Tuple[bool, str, Optional[Path]]:
         """Auto-click 'Present' / 'Có mặt' within 0.5s of release."""
-        context = await browser_pool.get_context(self.user_id, str(self.storage_state_path))
+        context = await browser_pool.get_context(self.user_id, self.get_storage_state())
         page = await context.new_page()
         screenshot_path = SCREENSHOT_DIR / f"attendance_{attendance_id}.png"
 

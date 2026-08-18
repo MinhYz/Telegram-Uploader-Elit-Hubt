@@ -16,7 +16,8 @@ class SessionVault:
         return self.session_dir / f"session_{user_id}.enc"
 
     def has_session(self, user_id: str) -> bool:
-        return self.get_session_file(user_id).exists()
+        file_path = self.get_session_file(user_id)
+        return file_path.exists() and file_path.stat().st_size > 0
 
     def save_session_state(self, user_id: str, state_dict: Dict[str, Any]):
         """Encrypt and save browser storage state JSON."""
@@ -33,12 +34,16 @@ class SessionVault:
     def load_session_state(self, user_id: str) -> Optional[Dict[str, Any]]:
         """Load and decrypt browser storage state JSON."""
         file_path = self.get_session_file(user_id)
-        if not file_path.exists():
+        if not file_path.exists() or file_path.stat().st_size == 0:
             return None
         try:
             with open(file_path, "r", encoding="utf-8") as f:
-                encrypted = f.read()
+                encrypted = f.read().strip()
+            if not encrypted:
+                return None
             raw_json = decrypt_data(encrypted)
+            if not raw_json:
+                return None
             return json.loads(raw_json)
         except Exception as e:
             logger.error(f"Failed to load/decrypt session state for user {user_id}: {e}")

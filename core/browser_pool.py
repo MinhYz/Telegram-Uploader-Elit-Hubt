@@ -1,6 +1,7 @@
 import os
+import json
 import asyncio
-from typing import Dict
+from typing import Dict, Any, Optional
 from playwright.async_api import async_playwright, Playwright, Browser, BrowserContext, Error as PlaywrightError
 from config.settings import HEADLESS, MAX_BROWSER_CONTEXTS
 from utils.logger import logger
@@ -42,7 +43,7 @@ class BrowserPool:
                 )
                 logger.info("BrowserPool initialized with single Chromium instance.")
 
-    async def get_context(self, user_id: str, storage_state_path: str = None) -> BrowserContext:
+    async def get_context(self, user_id: str, storage_state: Optional[Dict[str, Any] | str] = None) -> BrowserContext:
         await self.start()
         async with self._lock:
             # Check existing context validity
@@ -61,12 +62,21 @@ class BrowserPool:
                 oldest_uid = next(iter(self._contexts))
                 await self._close_context_unlocked(oldest_uid)
 
-            kwargs = {
+            kwargs: Dict[str, Any] = {
                 "viewport": {"width": 1280, "height": 800},
                 "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             }
-            if storage_state_path and isinstance(storage_state_path, (str, os.PathLike)) and os.path.exists(storage_state_path):
-                kwargs["storage_state"] = str(storage_state_path)
+            if storage_state:
+                if isinstance(storage_state, dict) and (storage_state.get("cookies") or storage_state.get("origins")):
+                    kwargs["storage_state"] = storage_state
+                elif isinstance(storage_state, (str, os.PathLike)) and os.path.exists(storage_state):
+                    try:
+                        with open(storage_state, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                            if isinstance(data, dict):
+                                kwargs["storage_state"] = data
+                    except Exception as ex_json:
+                        logger.warning(f"Storage state file {storage_state} is not valid JSON ({ex_json}), ignoring.")
 
             try:
                 context = await self._browser.new_context(**kwargs)

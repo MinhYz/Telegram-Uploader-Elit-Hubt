@@ -11,6 +11,7 @@ from core.browser_pool import browser_pool
 from core.session_vault import session_vault
 from core.anti_bot import AntiBotStealth
 from core.dom_engine import DOMEngine, circuit_breaker, CircuitBreakerOpenException
+from utils.date_parser import parse_moodle_datetime, check_is_unopened, get_vietnam_now
 from utils.logger import logger
 
 class SessionExpiredException(Exception):
@@ -175,13 +176,120 @@ class MoodleScraperService:
             desc_elem = await page.query_selector("#intro, .no-overflow")
             description = await desc_elem.inner_text() if desc_elem else "Không có mô tả chi tiết."
 
-            sub_status_elem = await page.query_selector(".submissionstatustable td.submissionstatus, td.cell.c1")
-            sub_status = await sub_status_elem.inner_text() if sub_status_elem else "Chưa nộp"
+            # Comprehensive DOM data extraction for Dates, Status, Submission Info
+            eval_data = await page.evaluate(r"""
+                () => {
+                    let opensAt = '';
+                    let dueDate = '';
+                    let timeRemaining = '';
+                    let subStatus = '';
+                    let gradingStatus = '';
+                    let lastModified = '';
+                    let unopenedNotice = false;
 
-            is_submitted = "Đã nộp" in sub_status or "Submitted" in sub_status
+                    // 1. Activity dates container (Moodle 3.11+ / 4.x)
+                    const actDates = document.querySelectorAll('[data-region="activity-dates"] div, .activity-dates div');
+                    for (const d of actDates) {
+                        const text = d.innerText.trim();
+                        if (/opens?|mở\s+lúc|mở\s+vào|mở|thời gian mở|được mở/i.test(text)) {
+                            opensAt = text.replace(/^(opens?|mở\s+lúc|mở\s+vào|mở|thời gian mở|được mở vào|được mở)[\s:]+/i, '').trim();
+                        } else if (/due|hạn chót|đến hạn|thời gian đến hạn|hạn nộp|thời gian hết hạn/i.test(text)) {
+                            dueDate = text.replace(/^(due|due\s+date|hạn chót|đến hạn|thời gian đến hạn|hạn nộp|thời gian hết hạn)[\s:]+/i, '').trim();
+                        }
+                    }
 
-            time_elem = await page.query_selector("td:has-text('Thời gian còn lại'), td.earlysubmission, td.latesubmission")
-            time_remaining = await time_elem.inner_text() if time_elem else ""
+                    // 2. Submission Status Table
+                    const statusTable = document.querySelector('.submissionstatustable, table.generaltable');
+                    if (statusTable) {
+                        const rows = Array.from(statusTable.querySelectorAll('tr'));
+                        for (const r of rows) {
+                            const th = r.querySelector('th, td.c0');
+                            const td = r.querySelector('td.cell, td.c1, td:nth-child(2)');
+                            if (th && td) {
+                                const header = th.innerText.trim();
+                                const val = td.innerText.trim();
+
+                                if (/trạng thái bài nộp|submission status/i.test(header)) {
+                                    subStatus = val;
+                                } else if (/trạng thái chấm|grading status/i.test(header)) {
+                                    gradingStatus = val;
+                                } else if (/thời gian còn lại|time remaining/i.test(header)) {
+                                    timeRemaining = val;
+                                } else if (/thời gian mở|opens?|allow submissions from|được mở|mở\s+vào/i.test(header)) {
+                                    opensAt = val;
+                                } else if (/hạn chót|due date|due|thời gian đến hạn|đến hạn|thời gian hết hạn/i.test(header)) {
+                                    dueDate = val;
+                                } else if (/chỉnh sửa lần cuối|last modified/i.test(header)) {
+                                    lastModified = val;
+                                }
+                            }
+                        }
+                    }
+
+                    // 3. Fallback scan in page body text
+                    const bodyText = document.body ? document.body.innerText : '';
+                    if (!opensAt) {
+                        const openMatch = bodyText.match(/(?:Opens|Mở vào|Mở lúc|Thời gian mở|Được mở vào|Được mở)[:\s]+([^\n\r,]+(?:,\s*[^\n\r]+)?)/i);
+                        if (openMatch) {
+                            opensAt = openMatch[1].trim();
+                        }
+                    }
+                    if (!dueDate) {
+                        const dueMatch = bodyText.match(/(?:Due date|Due|Hạn chót|Thời gian đến hạn|Đến hạn|Hạn nộp|Thời gian hết hạn)[:\s]+([^\n\r,]+(?:,\s*[^\n\r]+)?)/i);
+                        if (dueMatch) {
+                            dueDate = dueMatch[1].trim();
+                        }
+                    }
+                    if (!timeRemaining) {
+                        const timeMatch = bodyText.match(/(?:Thời gian còn lại|Time remaining)[:\s]+([^\n\r]+)/i);
+                        if (timeMatch) {
+                            timeRemaining = timeMatch[1].trim();
+                        }
+                    }
+
+                    // 4. Check submit buttons existence
+                    const submitButtons = document.querySelectorAll(
+                        "input[value*='Thêm bài nộp'], button:has-text('Thêm bài nộp'), input[value*='Add submission'], button:has-text('Add submission'), input[value*='SỬA BÀI NỘP'], a[href*='editsubmission'], input[value*='LOẠI BỎ BÀI NỘP']"
+                    );
+                    const hasSubmitBtn = submitButtons.length > 0;
+
+                    // 5. Check if page explicitly states unopened
+                    if (/chưa mở|not yet open|chưa tới thời gian|sẽ được mở vào|bài tập này chưa mở/i.test(bodyText)) {
+                        unopenedNotice = true;
+                    }
+
+                    return {
+                        opensAt,
+                        dueDate,
+                        timeRemaining,
+                        subStatus,
+                        gradingStatus,
+                        lastModified,
+                        hasSubmitBtn,
+                        unopenedNotice
+                    };
+                }
+            """)
+
+            opens_at = eval_data.get("opensAt", "").strip()
+            due_date = eval_data.get("dueDate", "").strip()
+            time_remaining = eval_data.get("timeRemaining", "").strip()
+            sub_status = eval_data.get("subStatus", "").strip() or "Chưa nộp"
+            grading_status = eval_data.get("gradingStatus", "").strip()
+
+            # Robust unopened & submission status detection
+            sub_lower = sub_status.lower()
+            is_submitted = any(t in sub_lower for t in ["đã nộp", "submitted", "nộp để chấm điểm", "✓"]) and "chưa" not in sub_lower
+
+            is_unopened = False
+            if opens_at:
+                is_unopened, _ = check_is_unopened(opens_at)
+            elif eval_data.get("unopenedNotice") and not eval_data.get("hasSubmitBtn") and not is_submitted:
+                is_unopened = True
+
+            is_open = not is_unopened
+            if not is_open and not is_submitted:
+                sub_status = "Chưa mở"
 
             return {
                 "assignment_id": aid,
@@ -189,14 +297,66 @@ class MoodleScraperService:
                 "title": title.strip(),
                 "description": description.strip(),
                 "url": url,
-                "status": sub_status.strip(),
+                "status": sub_status,
+                "grading_status": grading_status,
+                "opens_at": opens_at,
+                "due_date": due_date,
+                "time_remaining": time_remaining,
+                "is_open": is_open,
                 "is_submitted": is_submitted,
-                "time_remaining": time_remaining.strip(),
                 "user_id": self.user_id,
             }
         except Exception as e:
             logger.warning(f"Error inspecting assignment details {url}: {e}")
             return None
+
+    async def download_assignment_materials(self, assignment_id: str) -> List[Path]:
+        """Fetch and download homework files on demand when user clicks download button."""
+        context = await browser_pool.get_context(self.user_id, str(self.storage_state_path))
+        page = await context.new_page()
+        await AntiBotStealth.apply_stealth(page)
+        downloaded_paths = []
+
+        try:
+            view_url = ASSIGNMENT_VIEW_URL.format(id=assignment_id)
+            await page.goto(view_url, wait_until="networkidle", timeout=25000)
+
+            file_links = await page.evaluate("""
+                () => {
+                    const anchors = Array.from(document.querySelectorAll(
+                        ".intro a[href*='pluginfile.php'], .generalbox a[href*='pluginfile.php'], .fileuploadsubmission a[href*='pluginfile.php'], a[href*='mod_assign/introattachment']"
+                    ));
+                    return anchors.map(a => ({
+                        text: a.innerText.trim(),
+                        url: a.href
+                    })).filter(x => x.url && x.text);
+                }
+            """)
+
+            for link_info in file_links:
+                url = link_info["url"]
+                text = link_info["text"]
+                cleaned_name = re.sub(r'[\\/*?:"<>|]', "_", text) or f"material_{assignment_id}"
+                if not any(cleaned_name.lower().endswith(ext) for ext in [".pdf", ".docx", ".doc", ".xlsx", ".xls", ".zip", ".rar", ".png", ".jpg", ".txt"]):
+                    cleaned_name += ".pdf"
+
+                save_path = DOWNLOAD_DIR / f"{assignment_id}_{cleaned_name}"
+                try:
+                    resp = await page.request.get(url)
+                    if resp.status == 200:
+                        body = await resp.body()
+                        save_path.write_bytes(body)
+                        downloaded_paths.append(save_path)
+                except Exception as ex_dl:
+                    logger.warning(f"Failed to download attachment {url}: {ex_dl}")
+
+            return downloaded_paths
+        except Exception as e:
+            logger.error(f"Error in download_assignment_materials: {e}")
+            return []
+        finally:
+            await page.close()
+
 
     async def submit_assignment(self, assignment_id: str, file_paths: List[Path]) -> Tuple[bool, str, Optional[Path]]:
         context = await browser_pool.get_context(self.user_id, str(self.storage_state_path))

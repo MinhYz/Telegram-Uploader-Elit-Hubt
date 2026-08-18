@@ -11,6 +11,7 @@ from services.moodle_scraper import MoodleScraperService, SessionExpiredExceptio
 from services.ai_solver import ai_solver
 from services.self_debugger import self_debugger
 from services.analytics import grade_analytics
+from services.schedule_service import schedule_service
 from bot.keyboards import keyboards
 from bot.voice_processor import voice_processor
 from bot.web_shell import web_shell
@@ -35,8 +36,9 @@ class TelegramBotApp:
         self.app.add_handler(CommandHandler(["start", "menu"], self.start_cmd))
         self.app.add_handler(CommandHandler(["help", "huongdan"], self.help_cmd))
         self.app.add_handler(CommandHandler(["check", "quet"], self.check_cmd))
+        self.app.add_handler(CommandHandler(["tkb", "thoikhoabieu", "lichhoc"], self.tkb_cmd))
         self.app.add_handler(CommandHandler("solve", self.solve_cmd))
-        self.app.add_handler(CommandHandler("submit", self.submit_cmd))
+        self.app.add_handler(CommandHandler(["submit", "nopbai", "nop"], self.submit_cmd))
         self.app.add_handler(CommandHandler(["remove", "delete"], self.remove_cmd))
         self.app.add_handler(CommandHandler("login", self.login_cmd))
         self.app.add_handler(CommandHandler("whoami", self.whoami_cmd))
@@ -49,10 +51,11 @@ class TelegramBotApp:
         self.app.add_handler(CommandHandler(["admin", "panel"], self.admin_cmd))
         self.app.add_handler(CommandHandler("bash", self.bash_cmd))
 
-        # Callback & Voice Handlers
+        # Callback, Voice, Text & Attachment Handlers
         self.app.add_handler(CallbackQueryHandler(self.callback_handler))
         self.app.add_handler(MessageHandler(filters.VOICE, self.voice_cmd_handler))
         self.app.add_handler(MessageHandler(filters.ATTACHMENT, self.file_upload_handler))
+        self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.text_message_handler))
 
         # Global Error Handler
         self.app.add_error_handler(self.global_error_handler)
@@ -80,6 +83,8 @@ class TelegramBotApp:
             "• `/status`: Kiểm tra trạng thái Server VPS, RAM, CPU.\n"
             "• `/neofetch`: Xem tổng quan hệ thống OS & Phần cứng.\n"
             "• `/speedtest`: Đo tốc độ mạng VPS thực tế.\n\n"
+            "📅 **Thời Khóa Biểu & Lịch Học**:\n"
+            "• `/tkb <tên_lớp>` hoặc `/thoikhoabieu <tên_lớp>`: Tra cứu TKB HUBT (VD: `/tkb th30.10`).\n\n"
             "💡 **Giải Bài Tập Bằng AI**:\n"
             "• `/solve <assignment_id>`: Tự động giải bài tập bằng Gemini AI.\n\n"
             "📤 **Nộp bài & Quản lý Bài Nộp**:\n"
@@ -112,6 +117,41 @@ class TelegramBotApp:
         )
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboards.main_menu(uid, is_admin))
 
+    def _format_assignment_card(self, a: dict) -> str:
+        aid = a.get("assignment_id", "N/A")
+        is_open = a.get("is_open", True)
+        is_submitted = a.get("is_submitted", False)
+        opens_at = a.get("opens_at", "").strip()
+        due_date = a.get("due_date", "").strip()
+        time_rem = a.get("time_remaining", "").strip()
+
+        if not is_open:
+            status_text = "🔒 **Trạng thái**: ⏳ **Chưa mở** (Chưa tới thời gian nộp bài)"
+        elif is_submitted:
+            status_text = "📊 **Trạng thái**: ✅ **Đã nộp**"
+        else:
+            status_text = "📊 **Trạng thái**: ⚠️ **Chưa nộp**"
+
+        lines = [
+            f"📌 **Bài tập #{aid}**",
+            f"📘 **Môn**: {a.get('course_name', 'Môn học')}",
+            f"📝 **Tiêu đề**: {a.get('title', 'Bài tập')}",
+            status_text,
+        ]
+        if opens_at:
+            if not is_open:
+                lines.append(f"🔓 **Thời gian mở (Opens)**: `{opens_at}`")
+            else:
+                lines.append(f"🔓 **Đã mở lúc**: `{opens_at}`")
+        if due_date:
+            lines.append(f"⏰ **Thời gian hết hạn (Due)**: `{due_date}`")
+        if time_rem:
+            lines.append(f"⏳ **Thời gian còn lại**: {time_rem}")
+        if a.get("url"):
+            lines.append(f"🔗 [Xem trên ELit]({a['url']})")
+
+        return "\n".join(lines)
+
     async def check_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid = str(update.effective_user.id)
         msg = await update.message.reply_text("⏳ **Đang mở Playwright quét lớp học & bài tập hôm nay trên ELit HUBT...**")
@@ -125,23 +165,57 @@ class TelegramBotApp:
             await msg.edit_text(f"📋 **Phát hiện `{len(assignments)}` bài tập hôm nay:**")
             for a in assignments:
                 aid = a["assignment_id"]
-                txt = (
-                    f"📌 **Bài tập #{aid}**\n"
-                    f"📘 **Môn**: {a['course_name']}\n"
-                    f"📝 **Tiêu đề**: {a['title']}\n"
-                    f"📊 **Trạng thái**: {a['status']}\n"
-                    f"⏳ **Thời gian còn lại**: {a['time_remaining']}\n"
-                    f"🔗 [Xem trên ELit]({a['url']})"
-                )
+                txt = self._format_assignment_card(a)
                 await update.message.reply_text(
                     txt,
                     parse_mode="Markdown",
-                    reply_markup=keyboards.assignment_action(aid, a["is_submitted"], uid),
+                    reply_markup=keyboards.assignment_action(
+                        aid, a.get("is_submitted", False), uid, is_open=a.get("is_open", True)
+                    ),
                 )
                 await db.mark_assignment_seen(aid, a)
         except Exception as e:
             logger.error(f"Check command error: {e}")
             await msg.edit_text(f"❌ **Lỗi khi quét bài tập**: {str(e)}")
+
+    async def tkb_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        msg = update.effective_message
+        args = context.args
+        query = " ".join(args).strip() if args else ""
+
+        if not query:
+            text = (
+                "📅 **TRA CỨU THỜI KHÓA BIỂU HUBT**\n\n"
+                "Hệ thống tự động tra cứu từ cổng `https://itc.hubt.edu.vn/thoikhoabieu/`\n\n"
+                "👉 **Cú pháp**: `/tkb <tên_khóa/ngành/lớp>`\n"
+                "*(Ví dụ: `/tkb th30.10` hoặc `/tkb th30` hoặc `/tkb CNTT`)*\n\n"
+                "💡 Hoặc chọn nhanh các lớp mẫu bên dưới:"
+            )
+            await msg.reply_text(text, parse_mode="Markdown", reply_markup=keyboards.schedule_menu())
+            return
+
+        status_msg = await msg.reply_text(f"⏳ **Đang tra cứu thời khóa biểu cho `{query.upper()}`...**", parse_mode="Markdown")
+        try:
+            result = await schedule_service.fetch_schedule(query)
+            messages = schedule_service.format_schedule_messages(result)
+            
+            if not result.get("success"):
+                await status_msg.edit_text(messages[0], parse_mode="Markdown", reply_markup=keyboards.schedule_menu())
+                return
+
+            await status_msg.delete()
+            for idx, message_chunk in enumerate(messages):
+                is_last = (idx == len(messages) - 1)
+                reply_markup = keyboards.schedule_result_menu(query) if is_last else None
+                await msg.reply_text(
+                    message_chunk,
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True,
+                    reply_markup=reply_markup
+                )
+        except Exception as e:
+            logger.error(f"Error in tkb_cmd: {e}", exc_info=True)
+            await status_msg.edit_text(f"❌ **Lỗi khi tra cứu thời khóa biểu**: {str(e)}", reply_markup=keyboards.schedule_menu())
 
     async def solve_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = update.message
@@ -162,29 +236,107 @@ class TelegramBotApp:
         else:
             await status_msg.edit_text(f"❌ **Giải bài bằng AI thất bại**: {caption}")
 
-    async def submit_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("📤 **Vui lòng gửi file bài làm trực tiếp vào Chat kèm caption `/submit <ID_Bài_Tập>`!**")
-
-    async def file_upload_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        msg = update.message
-        caption = msg.caption or ""
-        match = re.search(r"submit\s+(\d+)", caption, re.IGNORECASE)
-        if not match:
+    async def _handle_submission_flow(self, update: Update, context: ContextTypes.DEFAULT_TYPE, direct_aid: Optional[str] = None):
+        msg = update.effective_message
+        if not msg:
             return
 
-        aid = match.group(1)
-        uid = str(msg.from_user.id)
-        doc = msg.document or (msg.photo[-1] if msg.photo else None)
-        if not doc:
+        uid = str(update.effective_user.id)
+        reply_msg = msg.reply_to_message
+        text_content = f"{msg.text or ''} {msg.caption or ''}".strip()
+
+        # 1. Determine assignment ID
+        aid = direct_aid
+        if not aid and context.args:
+            aid = context.args[0]
+
+        if not aid:
+            match_cmd = re.search(r"(?:/)?(?:submit|nopbai|nop)\s*[:=]?\s*(\d+)", text_content, re.IGNORECASE)
+            if match_cmd:
+                aid = match_cmd.group(1)
+
+        if not aid and reply_msg:
+            replied_text = f"{reply_msg.text or ''} {reply_msg.caption or ''}".strip()
+            match_reply = (
+                re.search(r"BÀI TẬP #(\d+)", replied_text, re.IGNORECASE)
+                or re.search(r"Assignment #(\d+)", replied_text, re.IGNORECASE)
+                or re.search(r"submit\s+(\d+)", replied_text, re.IGNORECASE)
+                or re.search(r"\b(\d{5,7})\b", replied_text)
+            )
+            if match_reply:
+                aid = match_reply.group(1)
+            elif reply_msg.document and getattr(reply_msg.document, "file_name", None):
+                match_fn = re.search(r"\b(\d{5,7})\b", reply_msg.document.file_name)
+                if match_fn:
+                    aid = match_fn.group(1)
+
+        if not aid:
+            match_any_id = re.search(r"\b(\d{5,7})\b", text_content)
+            if match_any_id:
+                aid = match_any_id.group(1)
+
+        # 2. Extract Document / Photo attachments from current message OR reply message
+        docs_to_submit = []
+
+        # From current message
+        if msg.document:
+            docs_to_submit.append(msg.document)
+        elif msg.photo:
+            docs_to_submit.append(msg.photo[-1])
+
+        # From replied message
+        if reply_msg:
+            if reply_msg.document and reply_msg.document not in docs_to_submit:
+                docs_to_submit.append(reply_msg.document)
+            elif reply_msg.photo and reply_msg.photo[-1] not in docs_to_submit:
+                docs_to_submit.append(reply_msg.photo[-1])
+
+        if not docs_to_submit:
+            if aid:
+                await msg.reply_text(
+                    f"⚠️ **Chưa tìm thấy file bài làm để nộp cho Bài tập #{aid}!**\n\n"
+                    f"👉 **Cách 1**: Gửi file bài làm kèm caption: `/submit {aid}`\n"
+                    f"👉 **Cách 2**: **Reply trực tiếp vào tin nhắn chứa file** bài làm với lệnh: `/submit {aid}`",
+                    parse_mode="Markdown"
+                )
+            else:
+                await msg.reply_text(
+                    "📤 **HƯỚNG DẪN NỘP BÀI LÊN ELIT HUBT**:\n\n"
+                    "1️⃣ **Cách 1**: Gửi file bài làm (`.pdf`, `.docx`, `.xlsx`, `.zip`) kèm caption: `/submit <ID_Bài_Tập>`\n"
+                    "2️⃣ **Cách 2**: **Reply tin nhắn chứa file** với lệnh: `/submit <ID_Bài_Tập>` (Ví dụ: `/submit 119340`)\n"
+                    "3️⃣ **Cách 3**: **Gửi file reply vào tin nhắn thông báo bài tập**",
+                    parse_mode="Markdown"
+                )
             return
 
-        status_msg = await msg.reply_text(f"⏳ **Đang tải file và nộp bài tập #{aid}...**")
-        file_obj = await context.bot.get_file(doc.file_id)
-        local_path = DOWNLOAD_DIR / getattr(doc, "file_name", f"submit_{aid}.pdf")
-        await file_obj.download_to_drive(custom_path=local_path)
+        if not aid:
+            await msg.reply_text(
+                "⚠️ **Không tìm thấy ID bài tập!**\n\n"
+                "Vui lòng chỉ định ID bài tập (Ví dụ: `/submit 119340` hoặc reply tin nhắn bài tập).",
+                parse_mode="Markdown"
+            )
+            return
+
+        # 3. Download files and submit
+        status_msg = await msg.reply_text(f"⏳ **Đang tải `{len(docs_to_submit)}` file và tiến hành nộp bài tập #{aid} lên ELit HUBT...**", parse_mode="Markdown")
+
+        saved_paths = []
+        for doc in docs_to_submit:
+            try:
+                file_obj = await context.bot.get_file(doc.file_id)
+                fname = getattr(doc, "file_name", None) or f"submit_{aid}_{int(time.time())}.pdf"
+                local_path = DOWNLOAD_DIR / fname
+                await file_obj.download_to_drive(custom_path=local_path)
+                saved_paths.append(local_path)
+            except Exception as ex_dl:
+                logger.error(f"Error downloading user attachment: {ex_dl}")
+
+        if not saved_paths:
+            await status_msg.edit_text("❌ **Lỗi**: Không thể tải file bài làm về máy chủ để nộp.")
+            return
 
         scraper = MoodleScraperService(uid)
-        success, sub_msg, screenshot_path = await scraper.submit_assignment(aid, [local_path])
+        success, sub_msg, screenshot_path = await scraper.submit_assignment(aid, saved_paths)
         if success:
             await status_msg.edit_text(f"🎉 **NỘP BÀI THÀNH CÔNG CHO BÀI TẬP #{aid}!**\n\n{sub_msg}")
             if screenshot_path and screenshot_path.exists():
@@ -192,6 +344,26 @@ class TelegramBotApp:
                     await msg.reply_photo(photo=InputFile(photo_f), caption=f"📸 **Xác nhận nộp bài tập #{aid}**")
         else:
             await status_msg.edit_text(f"❌ **NỘP BÀI THẤT BẠI**: {sub_msg}")
+
+    async def submit_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await self._handle_submission_flow(update, context)
+
+    async def file_upload_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await self._handle_submission_flow(update, context)
+
+    async def text_message_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        msg = update.effective_message
+        if not msg or not msg.text:
+            return
+
+        text = msg.text.strip()
+        # If user typed 'submit ...' or 'nopbai ...' or replied to a message
+        if re.search(r"^(?:/)?(?:submit|nopbai|nop)\b", text, re.IGNORECASE):
+            await self._handle_submission_flow(update, context)
+        elif msg.reply_to_message and (msg.reply_to_message.document or msg.reply_to_message.photo):
+            # If user replied to a file with just an ID like '119340'
+            if re.match(r"^\d{5,7}$", text):
+                await self._handle_submission_flow(update, context, direct_aid=text)
 
     async def remove_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid = str(update.effective_user.id)
@@ -444,18 +616,13 @@ class TelegramBotApp:
                 await query.message.reply_text(f"📋 **Phát hiện `{len(assignments)}` bài tập hôm nay:**")
                 for a in assignments:
                     aid = a["assignment_id"]
-                    txt = (
-                        f"📌 **Bài tập #{aid}**\n"
-                        f"📘 **Môn**: {a['course_name']}\n"
-                        f"📝 **Tiêu đề**: {a['title']}\n"
-                        f"📊 **Trạng thái**: {a['status']}\n"
-                        f"⏳ **Thời gian còn lại**: {a['time_remaining']}\n"
-                        f"🔗 [Xem trên ELit]({a['url']})"
-                    )
+                    txt = self._format_assignment_card(a)
                     await query.message.reply_text(
                         txt,
                         parse_mode="Markdown",
-                        reply_markup=keyboards.assignment_action(aid, a["is_submitted"], clicker_id),
+                        reply_markup=keyboards.assignment_action(
+                            aid, a.get("is_submitted", False), clicker_id, is_open=a.get("is_open", True)
+                        ),
                     )
                     await db.mark_assignment_seen(aid, a)
             except Exception as e:
@@ -486,6 +653,41 @@ class TelegramBotApp:
                 "*(Ví dụ: `/solve 119340` hoặc reply lệnh `/solve` vào tin nhắn bài tập)*"
             )
             await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboards.back_to_menu())
+
+        elif data == "btn_tkb_menu":
+            await query.answer()
+            text = (
+                "📅 **TRA CỨU THỜI KHÓA BIỂU HUBT**\n\n"
+                "Tra cứu thời khóa biểu trực tuyến từ Cổng ITC HUBT.\n\n"
+                "👉 **Cách dùng**: Nhập lệnh `/tkb <tên_lớp>` trong khung chat.\n"
+                "*(Ví dụ: `/tkb th30.10`)*\n\n"
+                "💡 Hoặc bấm vào lớp gợi ý bên dưới để tra cứu ngay:"
+            )
+            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboards.schedule_menu())
+
+        elif data.startswith("btn_tkb_quick:"):
+            target_class = data.split(":", 1)[1]
+            await query.answer(f"🔍 Đang tra cứu {target_class.upper()}...")
+            status_msg = await query.message.reply_text(f"⏳ **Đang tra cứu thời khóa biểu cho `{target_class.upper()}`...**", parse_mode="Markdown")
+            try:
+                result = await schedule_service.fetch_schedule(target_class)
+                messages = schedule_service.format_schedule_messages(result)
+                if not result.get("success"):
+                    await status_msg.edit_text(messages[0], parse_mode="Markdown", reply_markup=keyboards.schedule_menu())
+                    return
+                await status_msg.delete()
+                for idx, message_chunk in enumerate(messages):
+                    is_last = (idx == len(messages) - 1)
+                    reply_markup = keyboards.schedule_result_menu(target_class) if is_last else None
+                    await query.message.reply_text(
+                        message_chunk,
+                        parse_mode="Markdown",
+                        disable_web_page_preview=True,
+                        reply_markup=reply_markup
+                    )
+            except Exception as e:
+                logger.error(f"Error in btn_tkb_quick: {e}", exc_info=True)
+                await status_msg.edit_text(f"❌ **Lỗi khi tra cứu thời khóa biểu**: {str(e)}", reply_markup=keyboards.schedule_menu())
 
         elif data == "btn_whoami":
             await query.answer()
@@ -560,6 +762,36 @@ class TelegramBotApp:
             context.args = [aid]
             dummy_update = Update(update.update_id, message=query.message)
             await self.remove_cmd(dummy_update, context)
+
+        elif data.startswith("unopened_info:"):
+            aid = data.split(":")[1]
+            await query.answer(
+                f"⏳ Bài tập #{aid} hiện chưa tới thời gian mở nộp bài. Vui lòng quay lại nộp khi đến giờ mở!",
+                show_alert=True
+            )
+
+        elif data.startswith("download_materials:"):
+            aid = data.split(":")[1]
+            await query.answer("⏳ Đang tải file đề bài...")
+            status_msg = await query.message.reply_text(f"⏳ **Đang trích xuất file đề bài đính kèm cho Bài tập #{aid}...**")
+            scraper = MoodleScraperService(clicker_id)
+            try:
+                files = await scraper.download_assignment_materials(aid)
+                if not files:
+                    await status_msg.edit_text(f"⚠️ Không tìm thấy file đề bài đính kèm trên hệ thống cho Bài tập #{aid}.")
+                else:
+                    await status_msg.edit_text(f"✅ Đã tải thành công `{len(files)}` file đề bài:")
+                    for fpath in files:
+                        if fpath.exists():
+                            with open(fpath, "rb") as f_doc:
+                                await query.message.reply_document(
+                                    document=InputFile(f_doc, filename=fpath.name),
+                                    caption=f"📎 **File đề bài đính kèm**: `{fpath.name}` (Bài tập #{aid})",
+                                    parse_mode="Markdown",
+                                )
+            except Exception as e:
+                logger.error(f"Error downloading materials: {e}")
+                await status_msg.edit_text(f"❌ Lỗi khi tải file đề bài: {str(e)}")
 
         elif data.startswith("ai_solve:"):
             aid = data.split(":")[1]

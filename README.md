@@ -64,6 +64,7 @@ PYTHONPATH=. python3 main.py
 | Command | Description |
 |---|---|
 | `/start` | Open interactive main menu dashboard |
+| `/tkb <lớp>` | Tra cứu thời khóa biểu HUBT từ itc.hubt.edu.vn (VD: `/tkb th30.10`) |
 | `/check` | Scan active classes & list unsubmitted assignments |
 | `/solve <id>` | AI auto-solve assignment & generate Word/Excel solutions |
 | `/submit <id>` | Nộp bài tập kèm file đính kèm |

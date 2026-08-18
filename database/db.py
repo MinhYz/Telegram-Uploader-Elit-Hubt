@@ -33,10 +33,20 @@ class AsyncDatabase:
                     status TEXT,
                     grading_status TEXT,
                     time_remaining TEXT,
+                    opens_at TEXT,
+                    due_date TEXT,
+                    is_open INTEGER DEFAULT 1,
                     is_submitted INTEGER,
                     seen_at REAL
                 )
             """)
+            # Safe schema migrations for existing SQLite databases
+            for col, col_type in [("opens_at", "TEXT"), ("due_date", "TEXT"), ("is_open", "INTEGER DEFAULT 1")]:
+                try:
+                    await db.execute(f"ALTER TABLE assignments ADD COLUMN {col} {col_type}")
+                except Exception:
+                    pass
+
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS grades (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -134,12 +144,18 @@ class AsyncDatabase:
     async def mark_assignment_seen(self, assignment_id: str, data: Dict[str, Any]):
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
-                INSERT INTO assignments (assignment_id, user_id, course_name, title, url, status, grading_status, time_remaining, is_submitted, seen_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO assignments (
+                    assignment_id, user_id, course_name, title, url, status,
+                    grading_status, time_remaining, opens_at, due_date, is_open, is_submitted, seen_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(assignment_id) DO UPDATE SET
                     status = excluded.status,
                     grading_status = excluded.grading_status,
                     time_remaining = excluded.time_remaining,
+                    opens_at = excluded.opens_at,
+                    due_date = excluded.due_date,
+                    is_open = excluded.is_open,
                     is_submitted = excluded.is_submitted
             """, (
                 assignment_id,
@@ -150,6 +166,9 @@ class AsyncDatabase:
                 data.get("status", ""),
                 data.get("grading_status", ""),
                 data.get("time_remaining", ""),
+                data.get("opens_at", ""),
+                data.get("due_date", ""),
+                1 if data.get("is_open", True) else 0,
                 1 if data.get("is_submitted") else 0,
                 time.time()
             ))

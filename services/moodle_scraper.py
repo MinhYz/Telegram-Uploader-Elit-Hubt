@@ -249,11 +249,21 @@ class MoodleScraperService:
                         }
                     }
 
-                    // 4. Check submit buttons existence
-                    const submitButtons = document.querySelectorAll(
-                        "input[value*='Thêm bài nộp'], button:has-text('Thêm bài nộp'), input[value*='Add submission'], button:has-text('Add submission'), input[value*='SỬA BÀI NỘP'], a[href*='editsubmission'], input[value*='LOẠI BỎ BÀI NỘP']"
-                    );
-                    const hasSubmitBtn = submitButtons.length > 0;
+                    // 4. Check submit buttons existence using standard DOM selectors
+                    let hasSubmitBtn = false;
+                    const possibleButtons = Array.from(document.querySelectorAll(
+                        'input[type="submit"], input[type="button"], button, a.btn, a[href*="editsubmission"], a[href*="action=edit"], form[action*="editsubmission"]'
+                    ));
+                    for (const btn of possibleButtons) {
+                        const val = ((btn.value || "") + " " + (btn.innerText || "")).trim().toLowerCase();
+                        if (/thêm bài nộp|add submission|sửa bài nộp|edit submission|loại bỏ bài nộp|remove submission|save changes|lưu những thay đổi/i.test(val)) {
+                            hasSubmitBtn = true;
+                            break;
+                        }
+                    }
+                    if (!hasSubmitBtn && document.querySelector('form[action*="editsubmission"], a[href*="action=editsubmission"]')) {
+                        hasSubmitBtn = true;
+                    }
 
                     // 5. Check if page explicitly states unopened
                     if (/chưa mở|not yet open|chưa tới thời gian|sẽ được mở vào|bài tập này chưa mở/i.test(bodyText)) {

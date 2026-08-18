@@ -1,6 +1,7 @@
 import time
 import re
 from pathlib import Path
+from typing import Optional, List, Dict, Any, Tuple
 from telegram import Update, InputFile
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes

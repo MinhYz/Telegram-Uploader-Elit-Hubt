@@ -7,7 +7,7 @@ class AntiBotStealth:
     """Anti-Bot Evasion Engine providing humanized interactions and stealth script injections."""
 
     @staticmethod
-    async def apply_stealth(page: Page):
+    async def apply_stealth(page: Page, block_media: bool = True):
         """Mask navigator.webdriver and inject stealth scripts into page."""
         stealth_js = """
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
@@ -16,6 +16,14 @@ class AntiBotStealth:
             window.chrome = { runtime: {} };
         """
         await page.add_init_script(stealth_js)
+        if block_media:
+            try:
+                await page.route(
+                    "**/*",
+                    lambda route: route.abort() if route.request.resource_type in ("image", "media", "font") and "pluginfile" not in route.request.url else route.continue_()
+                )
+            except Exception:
+                pass
         logger.debug("Applied AntiBotStealth scripts to Playwright Page.")
 
     @staticmethod

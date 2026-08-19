@@ -53,10 +53,26 @@ class MoodleScraperService:
 
             logger.info(f"Logging in user {self.user_id} via MSV credentials...")
             await page.goto(LOGIN_URL, wait_until="networkidle", timeout=30000)
-            
-            username_sel = "input[name='username'], #username"
-            password_sel = "input[name='password'], #password"
-            login_btn_sel = "#loginbtn, button[type='submit'], input[type='submit']"
+
+            # 1. Check if already logged in (redirected to portal or home)
+            if await self._is_logged_in(page):
+                state = await context.storage_state()
+                session_vault.save_session_state(self.user_id, state)
+                return True, f"✅ Đăng nhập thành công tài khoản MSV `{username}`!"
+
+            username_sel = "input[name='username'], #username, input[autocomplete='username'], input[type='text']"
+            password_sel = "input[name='password'], #password, input[autocomplete='current-password'], input[type='password']"
+            login_btn_sel = "#loginbtn, button[type='submit'], input[type='submit'], button:has-text('Đăng nhập'), input[value*='Đăng nhập']"
+
+            # 2. Check if username field is present
+            user_input = await DOMEngine.find_element(page, ["input[name='username']", "#username", "input[type='text']"])
+            if not user_input:
+                await page.wait_for_timeout(2000)
+                if await self._is_logged_in(page):
+                    state = await context.storage_state()
+                    session_vault.save_session_state(self.user_id, state)
+                    return True, f"✅ Đăng nhập thành công tài khoản MSV `{username}`!"
+                return False, "Không tải được form đăng nhập ELit HUBT (Vui lòng thử lại hoặc đăng nhập bằng /login <token>)."
 
             await AntiBotStealth.human_type(page, username_sel, username)
             await AntiBotStealth.human_type(page, password_sel, password)
@@ -126,7 +142,7 @@ class MoodleScraperService:
 
         try:
             logger.info(f"Scanning classes & assignments for user {self.user_id}...")
-            await page.goto(PORTAL_URL, wait_until="networkidle", timeout=30000)
+            await page.goto(PORTAL_URL, wait_until="domcontentloaded", timeout=15000)
             if not await self._is_logged_in(page):
                 raise SessionExpiredException("Session hết hạn. Vui lòng /login lại.")
 
@@ -138,39 +154,54 @@ class MoodleScraperService:
                 }
             """)
 
+            sem = asyncio.Semaphore(4)
             assignments = []
             seen_assign_ids = set()
 
-            for c in course_links[:10]:
-                try:
-                    await page.goto(c["href"], wait_until="networkidle", timeout=20000)
-                    assign_elements = await page.evaluate("""
-                        () => {
-                            const assignAnchors = Array.from(document.querySelectorAll('a[href*="mod/assign/view.php?id="]'));
-                            return assignAnchors.map(a => ({
-                                title: a.innerText.trim(),
-                                url: a.href,
-                                id: a.href.split('id=')[1]
-                            }));
-                        }
-                    """)
-                    for a in assign_elements:
-                        aid = a["id"]
-                        if aid not in seen_assign_ids:
-                            seen_assign_ids.add(aid)
-                            details = await self._inspect_assignment_details(page, a["url"], c["title"])
-                            if details:
-                                assignments.append(details)
-                except Exception as ex_course:
-                    logger.warning(f"Error inspecting course {c['href']}: {ex_course}")
+            async def _inspect_course(c_info):
+                nonlocal assignments, seen_assign_ids
+                async with sem:
+                    c_page = None
+                    try:
+                        c_page = await context.new_page()
+                        await AntiBotStealth.apply_stealth(c_page)
+                        await c_page.goto(c_info["href"], wait_until="domcontentloaded", timeout=12000)
+                        assign_elements = await c_page.evaluate("""
+                            () => {
+                                const assignAnchors = Array.from(document.querySelectorAll('a[href*="mod/assign/view.php?id="]'));
+                                return assignAnchors.map(a => ({
+                                    title: a.innerText.trim(),
+                                    url: a.href,
+                                    id: a.href.split('id=')[1]
+                                }));
+                            }
+                        """)
+
+                        for a in assign_elements:
+                            aid = a["id"]
+                            if aid not in seen_assign_ids:
+                                seen_assign_ids.add(aid)
+                                details = await self._inspect_assignment_details(c_page, a["url"], c_info["title"])
+                                if details:
+                                    assignments.append(details)
+                    except Exception as ex_course:
+                        logger.warning(f"Error inspecting course {c_info['href']}: {ex_course}")
+                    finally:
+                        if c_page and not c_page.is_closed():
+                            await c_page.close()
+
+            # Run course scanning in parallel
+            tasks = [_inspect_course(c) for c in course_links[:10]]
+            await asyncio.gather(*tasks, return_exceptions=True)
 
             return assignments
         finally:
-            await page.close()
+            if page and not page.is_closed():
+                await page.close()
 
     async def _inspect_assignment_details(self, page, url: str, course_name: str) -> Optional[Dict[str, Any]]:
         try:
-            await page.goto(url, wait_until="networkidle", timeout=20000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=12000)
             aid = url.split("id=")[1]
             title_elem = await page.query_selector("h2, .page-header-headings h1")
             title = await title_elem.inner_text() if title_elem else f"Bài tập #{aid}"
@@ -204,70 +235,44 @@ class MoodleScraperService:
                     const statusTable = document.querySelector('.submissionstatustable, table.generaltable');
                     if (statusTable) {
                         const rows = Array.from(statusTable.querySelectorAll('tr'));
-                        for (const r of rows) {
-                            const th = r.querySelector('th, td.c0');
-                            const td = r.querySelector('td.cell, td.c1, td:nth-child(2)');
-                            if (th && td) {
-                                const header = th.innerText.trim();
-                                const val = td.innerText.trim();
+                        for (const row of rows) {
+                            const th = (row.querySelector('th, .cell.c0') ? row.querySelector('th, .cell.c0').innerText : '').trim().toLowerCase();
+                            const td = (row.querySelector('td, .cell.c1') ? row.querySelector('td, .cell.c1').innerText : '').trim();
 
-                                if (/trạng thái bài nộp|submission status/i.test(header)) {
-                                    subStatus = val;
-                                } else if (/trạng thái chấm|grading status/i.test(header)) {
-                                    gradingStatus = val;
-                                } else if (/thời gian còn lại|time remaining/i.test(header)) {
-                                    timeRemaining = val;
-                                } else if (/thời gian mở|opens?|allow submissions from|được mở|mở\s+vào/i.test(header)) {
-                                    opensAt = val;
-                                } else if (/hạn chót|due date|due|thời gian đến hạn|đến hạn|thời gian hết hạn/i.test(header)) {
-                                    dueDate = val;
-                                } else if (/chỉnh sửa lần cuối|last modified/i.test(header)) {
-                                    lastModified = val;
-                                }
+                            if (/trạng thái nộp|submission status/i.test(th)) {
+                                subStatus = td;
+                            } else if (/trạng thái chấm|grading status/i.test(th)) {
+                                gradingStatus = td;
+                            } else if (/thời gian còn lại|time remaining/i.test(th)) {
+                                timeRemaining = td;
+                            } else if (/hạn chót|đến hạn|thời gian đến hạn|due date/i.test(th)) {
+                                if (!dueDate) dueDate = td;
+                            } else if (/lần sửa đổi cuối|last modified/i.test(th)) {
+                                lastModified = td;
                             }
                         }
                     }
 
-                    // 3. Fallback scan in page body text
-                    const bodyText = document.body ? document.body.innerText : '';
-                    if (!opensAt) {
-                        const openMatch = bodyText.match(/(?:Opens|Mở vào|Mở lúc|Thời gian mở|Được mở vào|Được mở)[:\s]+([^\n\r,]+(?:,\s*[^\n\r]+)?)/i);
-                        if (openMatch) {
-                            opensAt = openMatch[1].trim();
-                        }
-                    }
+                    // 3. Fallback to raw text matching if table not structured
                     if (!dueDate) {
-                        const dueMatch = bodyText.match(/(?:Due date|Due|Hạn chót|Thời gian đến hạn|Đến hạn|Hạn nộp|Thời gian hết hạn)[:\s]+([^\n\r,]+(?:,\s*[^\n\r]+)?)/i);
-                        if (dueMatch) {
-                            dueDate = dueMatch[1].trim();
-                        }
-                    }
-                    if (!timeRemaining) {
-                        const timeMatch = bodyText.match(/(?:Thời gian còn lại|Time remaining)[:\s]+([^\n\r]+)/i);
-                        if (timeMatch) {
-                            timeRemaining = timeMatch[1].trim();
-                        }
+                        const allText = document.body.innerText;
+                        const dueMatch = allText.match(/(?:Hạn chót|Thời gian đến hạn|Due date|Đến hạn):\s*([^\n\r]+)/i);
+                        if (dueMatch) dueDate = dueMatch[1].trim();
+                        const timeRemMatch = allText.match(/(?:Thời gian còn lại|Time remaining):\s*([^\n\r]+)/i);
+                        if (timeRemMatch && !timeRemaining) timeRemaining = timeRemMatch[1].trim();
                     }
 
-                    // 4. Check submit buttons existence using standard DOM selectors
-                    let hasSubmitBtn = false;
-                    const possibleButtons = Array.from(document.querySelectorAll(
-                        'input[type="submit"], input[type="button"], button, a.btn, a[href*="editsubmission"], a[href*="action=edit"], form[action*="editsubmission"]'
-                    ));
-                    for (const btn of possibleButtons) {
-                        const val = ((btn.value || "") + " " + (btn.innerText || "")).trim().toLowerCase();
-                        if (/thêm bài nộp|add submission|sửa bài nộp|edit submission|loại bỏ bài nộp|remove submission|save changes|lưu những thay đổi/i.test(val)) {
-                            hasSubmitBtn = true;
-                            break;
+                    // 4. Unopened notice check
+                    const alertElem = document.querySelector('.alert-warning, .alert-info, .submissionnotopen, .box.py-3.generalbox');
+                    if (alertElem) {
+                        const txt = alertElem.innerText;
+                        if (/chưa được mở|chưa mở|not open|will open/i.test(txt)) {
+                            unopenedNotice = true;
+                            if (!opensAt) {
+                                const m = txt.match(/(?:mở|open)[^:\d]*:\s*([^\n\r]+)/i);
+                                if (m) opensAt = m[1].trim();
+                            }
                         }
-                    }
-                    if (!hasSubmitBtn && document.querySelector('form[action*="editsubmission"], a[href*="action=editsubmission"]')) {
-                        hasSubmitBtn = true;
-                    }
-
-                    // 5. Check if page explicitly states unopened
-                    if (/chưa mở|not yet open|chưa tới thời gian|sẽ được mở vào|bài tập này chưa mở/i.test(bodyText)) {
-                        unopenedNotice = true;
                     }
 
                     return {
@@ -277,79 +282,109 @@ class MoodleScraperService:
                         subStatus,
                         gradingStatus,
                         lastModified,
-                        hasSubmitBtn,
                         unopenedNotice
                     };
                 }
             """)
 
-            opens_at = eval_data.get("opensAt", "").strip()
-            due_date = eval_data.get("dueDate", "").strip()
-            time_remaining = eval_data.get("timeRemaining", "").strip()
-            sub_status = eval_data.get("subStatus", "").strip() or "Chưa nộp"
-            grading_status = eval_data.get("gradingStatus", "").strip()
+            opens_at = eval_data.get("opensAt", "")
+            due_date = eval_data.get("dueDate", "")
+            time_remaining = eval_data.get("timeRemaining", "")
+            sub_status = eval_data.get("subStatus", "")
+            grading_status = eval_data.get("gradingStatus", "")
+            last_modified = eval_data.get("lastModified", "")
+            unopened_notice = eval_data.get("unopenedNotice", False)
 
-            # Robust unopened & submission status detection
-            sub_lower = sub_status.lower()
-            is_submitted = any(t in sub_lower for t in ["đã nộp", "submitted", "nộp để chấm điểm", "✓"]) and "chưa" not in sub_lower
+            # Check submission status
+            is_submitted = False
+            if sub_status:
+                if any(k in sub_status.lower() for k in ["đã nộp", "submitted", "được chấm", "graded"]):
+                    is_submitted = True
+            elif "đã nộp để chấm" in (await page.content()).lower():
+                is_submitted = True
 
-            is_unopened = False
-            if opens_at:
+            # Calculate open status
+            is_open = True
+            if unopened_notice:
+                is_open = False
+            elif opens_at:
                 is_unopened, _ = check_is_unopened(opens_at)
-            elif eval_data.get("unopenedNotice") and not eval_data.get("hasSubmitBtn") and not is_submitted:
-                is_unopened = True
+                if is_unopened:
+                    is_open = False
 
-            is_open = not is_unopened
-            if not is_open and not is_submitted:
-                sub_status = "Chưa mở"
+            parsed_due_dt = parse_moodle_datetime(due_date) if due_date else None
+            parsed_open_dt = parse_moodle_datetime(opens_at) if opens_at else None
 
             return {
                 "assignment_id": aid,
+                "title": title,
                 "course_name": course_name,
-                "title": title.strip(),
-                "description": description.strip(),
+                "description": description[:300],
                 "url": url,
-                "status": sub_status,
-                "grading_status": grading_status,
                 "opens_at": opens_at,
                 "due_date": due_date,
+                "due_datetime": parsed_due_dt.isoformat() if parsed_due_dt else None,
+                "opens_datetime": parsed_open_dt.isoformat() if parsed_open_dt else None,
                 "time_remaining": time_remaining,
-                "is_open": is_open,
+                "submission_status": sub_status or ("Đã nộp bài" if is_submitted else "Chưa nộp bài"),
+                "grading_status": grading_status,
+                "last_modified": last_modified,
                 "is_submitted": is_submitted,
-                "user_id": self.user_id,
+                "is_open": is_open,
             }
         except Exception as e:
-            logger.warning(f"Error inspecting assignment details {url}: {e}")
+            logger.error(f"Error inspecting assignment {url}: {e}")
             return None
 
-    async def download_assignment_materials(self, assignment_id: str) -> List[Path]:
-        """Fetch and download homework files on demand when user clicks download button."""
+    async def download_assignment_materials(self, assignment_id: str) -> Tuple[List[Path], str]:
         context = await browser_pool.get_context(self.user_id, self.get_storage_state())
         page = await context.new_page()
         await AntiBotStealth.apply_stealth(page)
-        downloaded_paths = []
 
         try:
             view_url = ASSIGNMENT_VIEW_URL.format(id=assignment_id)
-            await page.goto(view_url, wait_until="networkidle", timeout=25000)
+            await page.goto(view_url, wait_until="domcontentloaded", timeout=15000)
 
-            file_links = await page.evaluate("""
+            if not await self._is_logged_in(page):
+                raise SessionExpiredException("Session hết hạn. Vui lòng /login lại.")
+
+            downloaded_paths = []
+
+            # Extract teacher instructions text
+            intro_text = await page.evaluate("""
                 () => {
-                    const anchors = Array.from(document.querySelectorAll(
-                        ".intro a[href*='pluginfile.php'], .generalbox a[href*='pluginfile.php'], .fileuploadsubmission a[href*='pluginfile.php'], a[href*='mod_assign/introattachment']"
-                    ));
-                    return anchors.map(a => ({
-                        text: a.innerText.trim(),
-                        url: a.href
-                    })).filter(x => x.url && x.text);
+                    const el = document.querySelector('#intro, .activity-description, .no-overflow, [data-region="activity-description"]');
+                    return el ? el.innerText.trim() : '';
                 }
             """)
 
+            # Extract downloadable file links
+            file_links = await page.evaluate("""
+                () => {
+                    const links = [];
+                    const anchors = Array.from(document.querySelectorAll('#region-main a[href*="pluginfile.php"], #intro a[href*="pluginfile.php"], .activity-description a[href*="pluginfile.php"], .introattachment a[href*="pluginfile.php"], .fileuploadsubmission a[href*="pluginfile.php"], a[href*="/mod_assign/introattachment/"]'));
+                    
+                    for (const a of anchors) {
+                        const href = a.href;
+                        if (!href || href.includes('theme/') || href.includes('pix.php') || href.includes('user/pix.php') || href.includes('/icon')) {
+                            continue;
+                        }
+                        const text = a.innerText.trim() || a.getAttribute('title') || href.split('/').pop().split('?')[0];
+                        links.push({ url: href, text: text });
+                    }
+                    return links;
+                }
+            """)
+
+            seen_urls = set()
             for link_info in file_links:
                 url = link_info["url"]
-                text = link_info["text"]
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                text = link_info.get("text", "")
                 cleaned_name = re.sub(r'[\\/*?:"<>|]', "_", text) or f"material_{assignment_id}"
-                if not any(cleaned_name.lower().endswith(ext) for ext in [".pdf", ".docx", ".doc", ".xlsx", ".xls", ".zip", ".rar", ".png", ".jpg", ".txt"]):
+                if not any(cleaned_name.lower().endswith(ext) for ext in [".pdf", ".docx", ".doc", ".xlsx", ".xls", ".zip", ".rar", ".png", ".jpg", ".txt", ".pptx", ".ppt"]):
                     cleaned_name += ".pdf"
 
                 save_path = DOWNLOAD_DIR / f"{assignment_id}_{cleaned_name}"
@@ -362,12 +397,15 @@ class MoodleScraperService:
                 except Exception as ex_dl:
                     logger.warning(f"Failed to download attachment {url}: {ex_dl}")
 
-            return downloaded_paths
+            return downloaded_paths, intro_text
+        except SessionExpiredException:
+            raise
         except Exception as e:
             logger.error(f"Error in download_assignment_materials: {e}")
-            return []
+            return [], intro_text
         finally:
-            await page.close()
+            if page and not page.is_closed():
+                await page.close()
 
 
     async def submit_assignment(self, assignment_id: str, file_paths: List[Path]) -> Tuple[bool, str, Optional[Path]]:
@@ -378,29 +416,158 @@ class MoodleScraperService:
 
         try:
             edit_url = ASSIGNMENT_EDIT_URL.format(id=assignment_id)
-            await page.goto(edit_url, wait_until="networkidle", timeout=30000)
+            logger.info(f"Opening edit submission page for assignment #{assignment_id} (user: {self.user_id})...")
+            await page.goto(edit_url, wait_until="domcontentloaded", timeout=15000)
 
-            file_input = await DOMEngine.find_element(page, ["input[type='file']"])
-            if not file_input:
-                return False, "Không tìm thấy ô chọn file nộp bài.", screenshot_path
+            # Check if session is expired or redirected to login
+            if not await self._is_logged_in(page):
+                await page.screenshot(path=str(screenshot_path))
+                return False, "Session hết hạn hoặc chưa đăng nhập. Vui lòng dùng lệnh /login lại.", screenshot_path
 
-            str_paths = [str(p) for p in file_paths]
-            await file_input.set_input_files(str_paths)
-            await page.wait_for_timeout(2000)
+            # If on view page, check if we need to click 'Thêm bài nộp' / 'Chỉnh sửa bài nộp' / 'Add submission'
+            add_sub_btn = await DOMEngine.find_element(
+                page,
+                [
+                    "a:has-text('Thêm bài nộp')", "button:has-text('Thêm bài nộp')", "input[value*='Thêm bài nộp']",
+                    "a:has-text('Chỉnh sửa bài nộp')", "button:has-text('Chỉnh sửa bài nộp')", "input[value*='Chỉnh sửa bài nộp']",
+                    "a:has-text('Add submission')", "button:has-text('Add submission')", "input[value*='Add submission']",
+                    "a:has-text('Edit submission')", "button:has-text('Edit submission')", "input[value*='Edit submission']"
+                ],
+                timeout_ms=2000
+            )
+            if add_sub_btn:
+                try:
+                    await add_sub_btn.click()
+                    await page.wait_for_load_state("domcontentloaded", timeout=10000)
+                except Exception as ex_btn:
+                    logger.debug(f"Click add submission button note: {ex_btn}")
 
-            save_btn = await DOMEngine.find_element(page, ["input[value*='Lưu'], input[value*='Save'], button:has-text('Lưu')"])
+            # Upload each file into Moodle FilePicker
+            files_uploaded = 0
+            for idx, fp in enumerate(file_paths):
+                file_uploaded = False
+                logger.info(f"Uploading file {idx + 1}/{len(file_paths)}: {fp.name}")
+
+                # Step 1: Click 'Add file' button (.fp-btn-add)
+                add_file_btn = await page.query_selector(
+                    ".fp-btn-add, a[title='Thêm...'], a[title='Thêm tệp...'], a[title='Add...'], a[title='Add file'], .fp-toolbar a, .dndupload-message"
+                )
+                if add_file_btn:
+                    try:
+                        await add_file_btn.click()
+                    except Exception as ex_click:
+                        logger.warning(f"Error clicking add file button for {fp.name}: {ex_click}")
+
+                # Step 2: Wait for modal to appear and click 'Tải file lên' / 'Upload a file' tab
+                try:
+                    upload_tab = await page.wait_for_selector(
+                        ".fp-repo-name:has-text('Tải file lên'), .fp-repo-name:has-text('Upload a file'), span:has-text('Tải file lên'), span:has-text('Upload a file'), .fp-repo-area li:first-child a",
+                        timeout=4000
+                    )
+                    if upload_tab:
+                        await upload_tab.click()
+                except Exception:
+                    pass
+
+                # Step 3: Wait for file input inside the modal
+                try:
+                    modal_file_input = await page.wait_for_selector(
+                        "input[type='file'][name='repo_upload_file'], .moodle-dialogue input[type='file'], input[type='file']",
+                        timeout=4000
+                    )
+                    if modal_file_input:
+                        await modal_file_input.set_input_files(str(fp))
+
+                        # Step 4: Click Upload confirm button
+                        upload_confirm_btn = await page.wait_for_selector(
+                            "button.fp-upload-btn, button:has-text('Tải file này lên'), button:has-text('Upload this file'), button:has-text('Đăng tải tệp này'), input[value*='Đăng tải tệp này']",
+                            timeout=4000
+                        )
+                        if upload_confirm_btn:
+                            await upload_confirm_btn.click()
+
+                            # Wait for upload confirm button to disappear
+                            try:
+                                await page.wait_for_selector("button.fp-upload-btn", state="hidden", timeout=10000)
+                            except Exception:
+                                pass
+
+                            await page.wait_for_timeout(500)
+                            file_uploaded = True
+                            files_uploaded += 1
+                            logger.info(f"Successfully uploaded {idx + 1}/{len(file_paths)}: {fp.name}")
+                except Exception as ex_modal:
+                    logger.warning(f"Error in FilePicker modal for {fp.name}: {ex_modal}")
+
+                # Fallback to direct input if FilePicker modal was not available
+                if not file_uploaded:
+                    direct_input = await page.query_selector("input[type='file']")
+                    if direct_input:
+                        try:
+                            await direct_input.set_input_files(str(fp))
+                            await page.wait_for_timeout(500)
+                            file_uploaded = True
+                            files_uploaded += 1
+                        except Exception as ex_direct:
+                            logger.warning(f"Direct file input error for {fp.name}: {ex_direct}")
+
+            if files_uploaded < len(file_paths):
+                await page.screenshot(path=str(screenshot_path))
+                if files_uploaded == 0:
+                    page_text = await page.inner_text("body")
+                    if "hết hạn" in page_text.lower() or "quá hạn" in page_text.lower() or "closed" in page_text.lower() or "due date" in page_text.lower():
+                        return False, "Bài tập đã hết hạn nộp hoặc đã bị khóa trên ELit HUBT.", screenshot_path
+                    if "không cho phép nộp file" in page_text.lower() or "văn bản trực tuyến" in page_text.lower() or "online text" in page_text.lower():
+                        return False, "Bài tập này yêu cầu nộp văn bản trực tuyến (Online text), không mở ô nộp file.", screenshot_path
+                    return False, "Không tìm thấy ô chọn file nộp bài trên ELit HUBT.", screenshot_path
+                return False, f"Chỉ tải lên được {files_uploaded}/{len(file_paths)} file lên FilePicker Moodle (Lỗi file: {file_paths[files_uploaded].name}).", screenshot_path
+
+            # Click 'Save changes' / 'Lưu những thay đổi' button
+            save_btn = await DOMEngine.find_element(
+                page,
+                [
+                    "input[type='submit'][name='submitbutton']",
+                    "#id_submitbutton",
+                    "input[value*='Lưu']",
+                    "button:has-text('Lưu những thay đổi')",
+                    "button:has-text('Lưu')",
+                    "input[value*='Save changes']",
+                    "input[value*='Save']"
+                ],
+                timeout_ms=3000
+            )
             if save_btn:
                 await save_btn.click()
-                await page.wait_for_load_state("networkidle", timeout=30000)
+            else:
+                await page.keyboard.press("Enter")
 
-            await page.screenshot(path=str(screenshot_path))
-            return True, f"Nộp thành công {len(file_paths)} file lên ELit HUBT!", screenshot_path
+            # Wait for status table or confirmation
+            try:
+                await page.wait_for_selector(".submissionstatustable, table.generaltable, .alert", timeout=8000)
+            except Exception:
+                pass
+
+            # Capture visual confirmation screenshot
+            status_table = await page.query_selector(".submissionstatustable, table.generaltable")
+            if status_table:
+                await status_table.screenshot(path=str(screenshot_path))
+            else:
+                await page.screenshot(path=str(screenshot_path))
+
+            page_content = await page.content()
+            if any(t in page_content for t in ["Đã nộp", "Submitted for grading", "Lưu thành công", "✓ Nộp", "submitted"]):
+                return True, f"Nộp thành công {len(file_paths)} file lên ELit HUBT! Moodle đã xác nhận bài nộp.", screenshot_path
+            return True, f"Đã gửi yêu cầu nộp {len(file_paths)} file lên ELit HUBT. Vui lòng kiểm tra ảnh xác nhận đính kèm.", screenshot_path
         except Exception as e:
             logger.error(f"Error submitting assignment {assignment_id}: {e}")
-            await page.screenshot(path=str(screenshot_path))
+            try:
+                await page.screenshot(path=str(screenshot_path))
+            except Exception:
+                pass
             return False, f"Lỗi nộp bài: {str(e)}", screenshot_path
         finally:
-            await page.close()
+            if page and not page.is_closed():
+                await page.close()
 
     async def remove_assignment_submission(self, assignment_id: str) -> Tuple[bool, str, Optional[Path]]:
         context = await browser_pool.get_context(self.user_id, self.get_storage_state())
@@ -410,19 +577,45 @@ class MoodleScraperService:
 
         try:
             view_url = ASSIGNMENT_VIEW_URL.format(id=assignment_id)
-            await page.goto(view_url, wait_until="networkidle", timeout=30000)
+            await page.goto(view_url, wait_until="domcontentloaded", timeout=12000)
 
-            remove_btn = await DOMEngine.find_element(page, ["input[value*='LOẠI BỎ BÀI NỘP']", "button:has-text('LOẠI BỎ BÀI NỘP')"])
+            if not await self._is_logged_in(page):
+                return False, "Session hết hạn hoặc chưa đăng nhập. Vui lòng dùng lệnh /login lại.", screenshot_path
+
+            remove_btn = await DOMEngine.find_element(
+                page,
+                [
+                    "input[value*='LOẠI BỎ BÀI NỘP']",
+                    "button:has-text('LOẠI BỎ BÀI NỘP')",
+                    "input[value*='Remove submission']",
+                    "button:has-text('Remove submission')",
+                    "a:has-text('LOẠI BỎ BÀI NỘP')",
+                    "a:has-text('Remove submission')"
+                ],
+                timeout_ms=3000
+            )
             if not remove_btn:
-                return False, "Không tìm thấy nút 'LOẠI BỎ BÀI NỘP'.", screenshot_path
+                await page.screenshot(path=str(screenshot_path))
+                return False, "Không tìm thấy nút 'LOẠI BỎ BÀI NỘP' (Có thể bài tập chưa nộp hoặc đã bị khóa).", screenshot_path
 
             await remove_btn.click()
-            await page.wait_for_load_state("networkidle", timeout=30000)
 
-            confirm_btn = await DOMEngine.find_element(page, ["input[value*='TIẾP TỤC']", "button:has-text('TIẾP TỤC')"])
+            confirm_btn = await DOMEngine.find_element(
+                page,
+                [
+                    "input[value*='TIẾP TỤC']",
+                    "button:has-text('TIẾP TỤC')",
+                    "input[value*='Continue']",
+                    "button:has-text('Continue')"
+                ],
+                timeout_ms=5000
+            )
             if confirm_btn:
                 await confirm_btn.click()
-                await page.wait_for_load_state("networkidle", timeout=30000)
+                try:
+                    await page.wait_for_selector(".submissionstatustable, table.generaltable, .alert", timeout=6000)
+                except Exception:
+                    pass
 
             await page.screenshot(path=str(screenshot_path))
             return True, "Đã loại bỏ bài nộp thành công trên ELit HUBT!", screenshot_path
@@ -430,7 +623,8 @@ class MoodleScraperService:
             logger.error(f"Error removing assignment {assignment_id}: {e}")
             return False, f"Lỗi gỡ bài nộp: {str(e)}", screenshot_path
         finally:
-            await page.close()
+            if page and not page.is_closed():
+                await page.close()
 
     async def instant_auto_attendance(self, attendance_id: str) -> Tuple[bool, str, Optional[Path]]:
         """Auto-click 'Present' / 'Có mặt' within 0.5s of release."""

@@ -89,4 +89,16 @@ class BotKeyboards:
             row.append(InlineKeyboardButton("📤 Nộp bài", callback_data=f"submit_help:{assign_id}"))
         return InlineKeyboardMarkup([row])
 
+    @staticmethod
+    def staging_menu(assign_id: str, file_count: int) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(f"🚀 ✅ CHỐT & NỘP NGAY ({file_count} file)", callback_data=f"commit_submit:{assign_id}"),
+            ],
+            [
+                InlineKeyboardButton("➕ Thêm file", callback_data=f"staging_add_hint:{assign_id}"),
+                InlineKeyboardButton("🗑️ Xóa hàng đợi", callback_data=f"staging_clear:{assign_id}"),
+            ]
+        ])
+
 keyboards = BotKeyboards()

@@ -25,6 +25,7 @@ class TelegramBotApp:
     def __init__(self):
         self.token = TELEGRAM_BOT_TOKEN
         self.app = None
+        self.staging_queues: Dict[str, List[Dict[str, Any]]] = {}
 
     def build(self):
         if not self.token:
@@ -40,6 +41,7 @@ class TelegramBotApp:
         self.app.add_handler(CommandHandler(["tkb", "thoikhoabieu", "lichhoc"], self.tkb_cmd))
         self.app.add_handler(CommandHandler("solve", self.solve_cmd))
         self.app.add_handler(CommandHandler(["submit", "nopbai", "nop"], self.submit_cmd))
+        self.app.add_handler(CommandHandler(["rename", "doiten"], self.rename_cmd))
         self.app.add_handler(CommandHandler(["remove", "delete"], self.remove_cmd))
         self.app.add_handler(CommandHandler("login", self.login_cmd))
         self.app.add_handler(CommandHandler("whoami", self.whoami_cmd))
@@ -67,12 +69,19 @@ class TelegramBotApp:
         logger.error(f"Global Error Handler caught exception: {context.error}", exc_info=context.error)
         if isinstance(update, Update) and update.effective_message:
             try:
+                err_clean = str(context.error).replace("`", "'")[:250]
                 await update.effective_message.reply_text(
-                    f"❌ **ĐÃ XẢY RA LỖI HỆ THỐNG**: `{str(context.error)[:300]}`",
+                    f"❌ **ĐÃ XẢY RA LỖI HỆ THỐNG**: `{err_clean}`",
                     parse_mode="Markdown",
                 )
             except Exception:
-                pass
+                try:
+                    await update.effective_message.reply_text(
+                        f"❌ ĐÃ XẢY RA LỖI HỆ THỐNG: {str(context.error)[:250]}",
+                        parse_mode=None,
+                    )
+                except Exception:
+                    pass
 
     async def help_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid = str(update.effective_user.id)
@@ -89,7 +98,8 @@ class TelegramBotApp:
             "💡 **Giải Bài Tập Bằng AI**:\n"
             "• `/solve <assignment_id>`: Tự động giải bài tập bằng Gemini AI.\n\n"
             "📤 **Nộp bài & Quản lý Bài Nộp**:\n"
-            "• `/submit <assignment_id>`: Nộp file bài làm lên ELit HUBT.\n"
+            "• `/submit <assignment_id> [tên_mới]`: Nộp file bài làm lên ELit HUBT (tùy chọn đổi tên).\n"
+            "• `/rename <tên_mới>`: Đổi tên file trực tiếp trên bot (reply tin nhắn chứa file).\n"
             "• `/remove <assignment_id>`: Gỡ bài nộp trên Moodle.\n\n"
             "👤 **Tài Khoản & Đăng Nhập**:\n"
             "• `/login <msv> <mật_khẩu>`: Đăng nhập tài khoản MSV HUBT.\n"
@@ -218,8 +228,11 @@ class TelegramBotApp:
             logger.error(f"Error in tkb_cmd: {e}", exc_info=True)
             await status_msg.edit_text(f"❌ **Lỗi khi tra cứu thời khóa biểu**: {str(e)}", reply_markup=keyboards.schedule_menu())
 
-    async def solve_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        msg = update.message
+    async def solve_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE, direct_uid: Optional[str] = None):
+        msg = update.effective_message
+        if not msg:
+            return
+        uid = direct_uid or (str(update.effective_user.id) if update.effective_user else "default")
         args = context.args
         aid = args[0] if args else "119340"
         
@@ -237,6 +250,17 @@ class TelegramBotApp:
         else:
             await status_msg.edit_text(f"❌ **Giải bài bằng AI thất bại**: {caption}")
 
+    def _is_forwarded_message(self, msg) -> bool:
+        if not msg:
+            return False
+        return bool(
+            getattr(msg, "forward_origin", None)
+            or getattr(msg, "forward_date", None)
+            or getattr(msg, "forward_from", None)
+            or getattr(msg, "forward_from_chat", None)
+            or getattr(msg, "forward_sender_name", None)
+        )
+
     async def _handle_submission_flow(self, update: Update, context: ContextTypes.DEFAULT_TYPE, direct_aid: Optional[str] = None):
         msg = update.effective_message
         if not msg:
@@ -245,6 +269,18 @@ class TelegramBotApp:
         uid = str(update.effective_user.id)
         reply_msg = msg.reply_to_message
         text_content = f"{msg.text or ''} {msg.caption or ''}".strip()
+
+        # Check if incoming message is a forwarded message
+        if self._is_forwarded_message(msg):
+            logger.info(f"Ignored forwarded message from user {uid} to prevent accidental submission.")
+            await msg.reply_text(
+                "⚠️ **Phát hiện tin nhắn chuyển tiếp (Forward)**!\n\n"
+                "🛡️ Để tránh nộp nhầm bài, bot **không tự động upload / nộp bài cho file chuyển tiếp**.\n\n"
+                "👉 Nếu bạn muốn nộp file này, vui lòng **Reply trực tiếp vào tin nhắn file trên** với lệnh:\n"
+                "`/submit <ID_Bài_Tập>` *(Ví dụ: `/submit 118521`)*",
+                parse_mode="Markdown"
+            )
+            return
 
         # 1. Determine assignment ID
         aid = direct_aid
@@ -318,38 +354,101 @@ class TelegramBotApp:
             )
             return
 
-        # 3. Download files and submit
-        status_msg = await msg.reply_text(f"⏳ **Đang tải `{len(docs_to_submit)}` file và tiến hành nộp bài tập #{aid} lên ELit HUBT...**", parse_mode="Markdown")
-
-        saved_paths = []
-        for doc in docs_to_submit:
-            try:
-                file_obj = await context.bot.get_file(doc.file_id)
-                fname = getattr(doc, "file_name", None) or f"submit_{aid}_{int(time.time())}.pdf"
-                local_path = DOWNLOAD_DIR / fname
-                await file_obj.download_to_drive(custom_path=local_path)
-                saved_paths.append(local_path)
-            except Exception as ex_dl:
-                logger.error(f"Error downloading user attachment: {ex_dl}")
-
-        if not saved_paths:
-            await status_msg.edit_text("❌ **Lỗi**: Không thể tải file bài làm về máy chủ để nộp.")
-            return
-
-        scraper = MoodleScraperService(uid)
-        success, sub_msg, screenshot_path = await scraper.submit_assignment(aid, saved_paths)
-        if success:
-            await status_msg.edit_text(f"🎉 **NỘP BÀI THÀNH CÔNG CHO BÀI TẬP #{aid}!**\n\n{sub_msg}")
-            if screenshot_path and screenshot_path.exists():
-                with open(screenshot_path, "rb") as photo_f:
-                    await msg.reply_photo(photo=InputFile(photo_f), caption=f"📸 **Xác nhận nộp bài tập #{aid}**")
+        # Check for custom rename argument in submit command
+        custom_submit_name = None
+        if context.args and len(context.args) > 1:
+            custom_submit_name = " ".join(context.args[1:]).strip()
         else:
-            await status_msg.edit_text(f"❌ **NỘP BÀI THẤT BẠI**: {sub_msg}")
+            match_custom = re.search(r"(?:/)?(?:submit|nopbai|nop)\s*[:=]?\s*\d+\s+([^\n\r]+)", text_content, re.IGNORECASE)
+            if match_custom:
+                custom_submit_name = match_custom.group(1).strip()
+
+        # Add docs to user's staging queue
+        queue_key = f"{uid}_{aid}"
+        if queue_key not in self.staging_queues:
+            self.staging_queues[queue_key] = []
+
+        existing_file_ids = {f["file_id"] for f in self.staging_queues[queue_key]}
+        new_added_count = 0
+
+        for idx, doc in enumerate(docs_to_submit):
+            if doc.file_id in existing_file_ids:
+                continue
+            orig_fn = getattr(doc, "file_name", None) or f"submit_{aid}_{int(time.time())}.pdf"
+            if custom_submit_name:
+                cleaned_custom = re.sub(r'[\\/*?:"<>|]', "_", custom_submit_name).strip()
+                if not Path(cleaned_custom).suffix:
+                    cleaned_custom += (Path(orig_fn).suffix or ".pdf")
+                if len(docs_to_submit) > 1:
+                    fname = f"{Path(cleaned_custom).stem}_{idx + 1}{Path(cleaned_custom).suffix}"
+                else:
+                    fname = cleaned_custom
+            else:
+                fname = orig_fn
+
+            file_size = getattr(doc, "file_size", 0)
+            self.staging_queues[queue_key].append({
+                "file_id": doc.file_id,
+                "file_name": fname,
+                "file_size": file_size,
+            })
+            existing_file_ids.add(doc.file_id)
+            new_added_count += 1
+
+        staged_files = self.staging_queues[queue_key]
+
+        # Format staged file list message
+        def _fmt_size(b: int) -> str:
+            if not b:
+                return ""
+            if b < 1024 * 1024:
+                return f"({b / 1024:.1f} KB)"
+            return f"({b / (1024 * 1024):.1f} MB)"
+
+        file_list_lines = []
+        for i, sf in enumerate(staged_files, start=1):
+            file_list_lines.append(f"{i}️⃣ `{sf['file_name']}` {_fmt_size(sf['file_size'])}")
+
+        staged_text = "\n".join(file_list_lines)
+
+        reply_text = (
+            f"📦 **HÀNG ĐỢI NỘP BÀI - BÀI TẬP #{aid}**\n\n"
+            f"Hiện đang có **`{len(staged_files)}` file** sẵn sàng nộp:\n"
+            f"{staged_text}\n\n"
+            f"💡 **Thao tác tiếp theo**:\n"
+            f"• **Muốn nộp thêm file?** Gửi hoặc reply tiếp file khác vào đây.\n"
+            f"• **Đã đủ file?** Bấm nút **🚀 ✅ CHỐT & NỘP NGAY** bên dưới để bot tải tất cả lên ELit HUBT!"
+        )
+
+        await msg.reply_text(
+            reply_text,
+            parse_mode="Markdown",
+            reply_markup=keyboards.staging_menu(aid, len(staged_files))
+        )
 
     async def submit_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await self._handle_submission_flow(update, context)
 
     async def file_upload_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        msg = update.effective_message
+        if not msg:
+            return
+
+        # Ignore forwarded files from auto-submitting
+        if self._is_forwarded_message(msg):
+            logger.info(f"Ignored forwarded attachment from user {update.effective_user.id}.")
+            await msg.reply_text(
+                "⚠️ **Phát hiện file chuyển tiếp (Forward)**!\n\n"
+                "🛡️ Bot không tự động nộp bài cho file chuyển tiếp để tránh nộp nhầm.\n"
+                "👉 Nếu bạn muốn nộp file này, hãy **Reply trực tiếp vào file này** với lệnh `/submit <ID_Bài_Tập>`.",
+                parse_mode="Markdown"
+            )
+            return
+
+        text_content = f"{msg.text or ''} {msg.caption or ''}".strip()
+        if re.search(r"^(?:/)?(?:rename|doiten)\b", text_content, re.IGNORECASE):
+            await self.rename_cmd(update, context)
+            return
         await self._handle_submission_flow(update, context)
 
     async def text_message_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -357,7 +456,15 @@ class TelegramBotApp:
         if not msg or not msg.text:
             return
 
+        # Ignore forwarded text messages
+        if self._is_forwarded_message(msg):
+            return
+
         text = msg.text.strip()
+        # If user typed 'rename ...' or 'doiten ...'
+        if re.search(r"^(?:/)?(?:rename|doiten)\b", text, re.IGNORECASE):
+            await self.rename_cmd(update, context)
+            return
         # If user typed 'submit ...' or 'nopbai ...' or replied to a message
         if re.search(r"^(?:/)?(?:submit|nopbai|nop)\b", text, re.IGNORECASE):
             await self._handle_submission_flow(update, context)
@@ -366,22 +473,102 @@ class TelegramBotApp:
             if re.match(r"^\d{5,7}$", text):
                 await self._handle_submission_flow(update, context, direct_aid=text)
 
-    async def remove_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        uid = str(update.effective_user.id)
+    async def rename_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        msg = update.effective_message
+        if not msg:
+            return
+
+        reply_msg = msg.reply_to_message
+        target_doc = None
+        orig_name = None
+
+        if msg.document:
+            target_doc = msg.document
+            orig_name = getattr(msg.document, "file_name", "file.pdf")
+        elif msg.photo:
+            target_doc = msg.photo[-1]
+            orig_name = "image.jpg"
+        elif reply_msg and reply_msg.document:
+            target_doc = reply_msg.document
+            orig_name = getattr(reply_msg.document, "file_name", "file.pdf")
+        elif reply_msg and reply_msg.photo:
+            target_doc = reply_msg.photo[-1]
+            orig_name = "image.jpg"
+
+        if not target_doc:
+            await msg.reply_text(
+                "✏️ **HƯỚNG DẪN ĐỔI TÊN FILE TRÊN BOT**:\n\n"
+                "👉 **Cách 1**: Reply tin nhắn chứa file bài làm với lệnh:\n"
+                "`/rename <Tên_Mới>` (Ví dụ: `/rename 2410A01_NguyenVanA_BaiTap1.docx`)\n\n"
+                "👉 **Cách 2**: Gửi file bài làm kèm caption:\n"
+                "`/rename <Tên_Mới>`\n\n"
+                "💡 *Mẹo: Không cần gõ đuôi tệp (như `.docx`, `.pdf`), bot sẽ tự động giữ nguyên định dạng file gốc!*",
+                parse_mode="Markdown"
+            )
+            return
+
+        new_name_raw = " ".join(context.args).strip() if context.args else ""
+        if not new_name_raw:
+            text_content = f"{msg.text or ''} {msg.caption or ''}".strip()
+            match_rn = re.search(r"(?:/)?(?:rename|doiten)\s+(.+)", text_content, re.IGNORECASE)
+            if match_rn:
+                new_name_raw = match_rn.group(1).strip()
+
+        if not new_name_raw:
+            await msg.reply_text(
+                "⚠️ **Vui lòng nhập tên mới cho file!**\n\n"
+                "*Ví dụ*: `/rename 2410A01_NguyenVanA_BaiTap1`",
+                parse_mode="Markdown"
+            )
+            return
+
+        orig_ext = Path(orig_name).suffix or ".pdf"
+        cleaned_new_name = re.sub(r'[\\/*?:"<>|]', "_", new_name_raw).strip()
+        if not Path(cleaned_new_name).suffix:
+            cleaned_new_name += orig_ext
+
+        status_msg = await msg.reply_text(f"⏳ **Đang xử lý đổi tên file thành `{cleaned_new_name}`...**", parse_mode="Markdown")
+        try:
+            file_obj = await context.bot.get_file(target_doc.file_id)
+            local_path = DOWNLOAD_DIR / cleaned_new_name
+            await file_obj.download_to_drive(custom_path=local_path)
+
+            with open(local_path, "rb") as f_doc:
+                await msg.reply_document(
+                    document=InputFile(f_doc, filename=cleaned_new_name),
+                    caption=(
+                        f"✅ **ĐÃ ĐỔI TÊN FILE THÀNH CÔNG!**\n\n"
+                        f"📄 **Tên mới**: `{cleaned_new_name}`\n"
+                        f"📦 **Tên gốc**: `{orig_name}`\n\n"
+                        f"👉 *Bạn có thể reply trực tiếp file này với lệnh `/submit <ID_Bài_Tập>` để nộp lên Moodle.*"
+                    ),
+                    parse_mode="Markdown"
+                )
+            await status_msg.delete()
+        except Exception as e:
+            logger.error(f"Error renaming file: {e}")
+            await status_msg.edit_text(f"❌ **Lỗi khi đổi tên file**: {str(e)}")
+
+    async def remove_cmd(self, update: Update, context: ContextTypes.DEFAULT_TYPE, direct_uid: Optional[str] = None):
+        msg = update.effective_message
+        if not msg:
+            return
+
+        uid = direct_uid or (str(update.effective_user.id) if update.effective_user else "default")
         args = context.args
         if not args:
-            await update.message.reply_text("⚠️ Cú pháp: `/remove <ID_Bài_tập>` (Ví dụ: `/remove 119340`)")
+            await msg.reply_text("⚠️ Cú pháp: `/remove <ID_Bài_tập>` (Ví dụ: `/remove 119340`)")
             return
 
         aid = args[0]
-        status_msg = await update.message.reply_text(f"⏳ **Đang tiến hành gỡ bài nộp cho Bài tập #{aid}...**")
+        status_msg = await msg.reply_text(f"⏳ **Đang tiến hành gỡ bài nộp cho Bài tập #{aid}...**")
         scraper = MoodleScraperService(uid)
         success, msg_result, screenshot_path = await scraper.remove_assignment_submission(aid)
         if success:
             await status_msg.edit_text(f"✅ **ĐÃ XÓA BÀI NỘP THÀNH CÔNG!**\n\n{msg_result}")
             if screenshot_path and screenshot_path.exists():
                 with open(screenshot_path, "rb") as photo_f:
-                    await update.message.reply_photo(photo=InputFile(photo_f), caption=f"📸 Trạng thái gỡ bài #{aid}")
+                    await msg.reply_photo(photo=InputFile(photo_f), caption=f"📸 Trạng thái gỡ bài #{aid}")
         else:
             await status_msg.edit_text(f"❌ **XÓA BÀI NỘP THẤT BẠI**: {msg_result}")
 
@@ -398,6 +585,15 @@ class TelegramBotApp:
         except Exception:
             pass
 
+        async def _safe_edit(msg_to_edit, text_content):
+            try:
+                await msg_to_edit.edit_text(text_content, parse_mode="Markdown")
+            except Exception:
+                try:
+                    await msg_to_edit.edit_text(text_content, parse_mode=None)
+                except Exception as ex_edit:
+                    logger.warning(f"Error editing login status message: {ex_edit}")
+
         if len(args) == 2:
             msv, password = args[0], args[1]
             status_msg = await context.bot.send_message(chat_id=chat_id, text=f"⏳ **Đang tiến hành đăng nhập tài khoản MSV `{msv}` lên ELit HUBT...**", parse_mode="Markdown")
@@ -405,7 +601,7 @@ class TelegramBotApp:
             ok, res = await scraper.login(username=msv, password=password)
             if ok:
                 await db.save_user(uid, msv=msv, password=password)
-            await status_msg.edit_text(res, parse_mode="Markdown")
+            await _safe_edit(status_msg, res)
         elif len(args) == 1:
             token = args[0]
             status_msg = await context.bot.send_message(chat_id=chat_id, text="⏳ **Đang tiến hành xác thực bằng Token Session Cookie...**", parse_mode="Markdown")
@@ -413,7 +609,7 @@ class TelegramBotApp:
             ok, res = await scraper.login(token=token)
             if ok:
                 await db.save_user(uid, token=token)
-            await status_msg.edit_text(res, parse_mode="Markdown")
+            await _safe_edit(status_msg, res)
         else:
             await context.bot.send_message(
                 chat_id=chat_id,
@@ -761,8 +957,7 @@ class TelegramBotApp:
 
             await query.answer()
             context.args = [aid]
-            dummy_update = Update(update.update_id, message=query.message)
-            await self.remove_cmd(dummy_update, context)
+            await self.remove_cmd(update, context, direct_uid=clicker_id)
 
         elif data.startswith("unopened_info:"):
             aid = data.split(":")[1]
@@ -777,19 +972,36 @@ class TelegramBotApp:
             status_msg = await query.message.reply_text(f"⏳ **Đang trích xuất file đề bài đính kèm cho Bài tập #{aid}...**")
             scraper = MoodleScraperService(clicker_id)
             try:
-                files = await scraper.download_assignment_materials(aid)
+                files, intro_text = await scraper.download_assignment_materials(aid)
                 if not files:
-                    await status_msg.edit_text(f"⚠️ Không tìm thấy file đề bài đính kèm trên hệ thống cho Bài tập #{aid}.")
+                    if intro_text:
+                        await status_msg.edit_text(
+                            f"ℹ️ **Bài tập #{aid} không có file đính kèm riêng, nội dung đề bài trực tiếp trên hệ thống:**\n\n"
+                            f"📝 `{intro_text[:2000]}`"
+                        )
+                    else:
+                        await status_msg.edit_text(
+                            f"⚠️ Không tìm thấy file đề bài đính kèm trên hệ thống cho Bài tập #{aid}.\n"
+                            f"*(Giáo viên có thể không đính kèm file hoặc chỉ giao bài tập trực tiếp trên lớp)*."
+                        )
                 else:
                     await status_msg.edit_text(f"✅ Đã tải thành công `{len(files)}` file đề bài:")
                     for fpath in files:
                         if fpath.exists():
+                            # Remove assignment ID prefix like 118521_ from downloaded filename
+                            clean_doc_name = re.sub(r"^\d{4,8}_", "", fpath.name) or fpath.name
                             with open(fpath, "rb") as f_doc:
                                 await query.message.reply_document(
-                                    document=InputFile(f_doc, filename=fpath.name),
-                                    caption=f"📎 **File đề bài đính kèm**: `{fpath.name}` (Bài tập #{aid})",
+                                    document=InputFile(f_doc, filename=clean_doc_name),
+                                    caption=f"📎 **File đề bài đính kèm**: `{clean_doc_name}` (Bài tập #{aid})",
                                     parse_mode="Markdown",
                                 )
+            except SessionExpiredException:
+                await status_msg.edit_text(
+                    "⚠️ **Session đã hết hạn!**\n\n"
+                    "Vui lòng gửi lại `/login <MSV> <Mật_khẩu>` hoặc `/token <MoodleSession>` để làm mới phiên đăng nhập.",
+                    parse_mode="Markdown"
+                )
             except Exception as e:
                 logger.error(f"Error downloading materials: {e}")
                 await status_msg.edit_text(f"❌ Lỗi khi tải file đề bài: {str(e)}")
@@ -798,7 +1010,74 @@ class TelegramBotApp:
             aid = data.split(":")[1]
             await query.answer("⏳ Đang giải tự động bài tập bằng Gemini AI...")
             context.args = [aid]
-            dummy_update = Update(update.update_id, message=query.message)
-            await self.solve_cmd(dummy_update, context)
+            await self.solve_cmd(update, context, direct_uid=clicker_id)
+
+        elif data.startswith("staging_add_hint:"):
+            aid = data.split(":")[1]
+            await query.answer(
+                f"➕ Bạn chỉ cần gửi tiếp file hoặc reply tin nhắn này với file tiếp theo để thêm vào hàng đợi bài tập #{aid}!",
+                show_alert=True
+            )
+
+        elif data.startswith("staging_clear:"):
+            aid = data.split(":")[1]
+            queue_key = f"{clicker_id}_{aid}"
+            self.staging_queues.pop(queue_key, None)
+            await query.answer("🗑️ Đã xóa hàng đợi nộp bài!", show_alert=True)
+            await query.edit_message_text(
+                f"🗑️ **Đã hủy hàng đợi nộp bài cho Bài tập #{aid}!**\n\n"
+                f"Bạn có thể gửi lại file bất kỳ lúc nào.",
+                reply_markup=keyboards.back_to_menu()
+            )
+
+        elif data.startswith("commit_submit:"):
+            aid = data.split(":")[1]
+            queue_key = f"{clicker_id}_{aid}"
+            staged_files = self.staging_queues.get(queue_key, [])
+
+            if not staged_files:
+                await query.answer("⚠️ Hàng đợi trống! Vui lòng gửi file bài làm trước khi chốt nộp.", show_alert=True)
+                return
+
+            await query.answer("🚀 Đang tiến hành nộp tất cả file lên ELit HUBT...")
+            status_msg = query.message
+            await status_msg.edit_text(
+                f"⏳ **Đang tải `{len(staged_files)}` file và tiến hành nộp bài tập #{aid} lên ELit HUBT...**",
+                parse_mode="Markdown"
+            )
+
+            saved_paths = []
+            for sf in staged_files:
+                try:
+                    file_obj = await context.bot.get_file(sf["file_id"])
+                    local_path = DOWNLOAD_DIR / sf["file_name"]
+                    await file_obj.download_to_drive(custom_path=local_path)
+                    saved_paths.append(local_path)
+                except Exception as ex_dl:
+                    logger.error(f"Error downloading staged attachment: {ex_dl}")
+
+            if not saved_paths:
+                await status_msg.edit_text("❌ **Lỗi**: Không thể tải file bài làm về máy chủ để nộp.")
+                return
+
+            scraper = MoodleScraperService(clicker_id)
+            success, sub_msg, screenshot_path = await scraper.submit_assignment(aid, saved_paths)
+            if success:
+                # Clear queue on successful submission
+                self.staging_queues.pop(queue_key, None)
+                file_names_str = "\n".join([f"• `{p.name}`" for p in saved_paths])
+                await status_msg.edit_text(
+                    f"🎉 **NỘP BÀI THÀNH CÔNG CHO BÀI TẬP #{aid}!**\n\n"
+                    f"📁 **Các file đã nộp ({len(saved_paths)} file)**:\n{file_names_str}\n\n"
+                    f"{sub_msg}"
+                )
+                if screenshot_path and screenshot_path.exists():
+                    with open(screenshot_path, "rb") as photo_f:
+                        await query.message.reply_photo(
+                            photo=InputFile(photo_f),
+                            caption=f"📸 **Xác nhận nộp thành công {len(saved_paths)} file (Bài tập #{aid})**"
+                        )
+            else:
+                await status_msg.edit_text(f"❌ **NỘP BÀI THẤT BẠI**: {sub_msg}")
 
 bot_app = TelegramBotApp()
